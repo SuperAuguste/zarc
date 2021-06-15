@@ -215,3 +215,154 @@ pub const Section = union(enum) {
         }
     }
 };
+
+// High-level constructs
+
+pub const ZipFile = struct {
+    name: []const u8,
+    offset: u64,
+};
+
+pub const ZipDirectoryChild = union(enum) {
+    directory: *ZipDirectory,
+    file: *ZipFile,
+};
+
+pub const ZipDirectory = struct {
+    name: []const u8,
+    children: std.StringHashMap(ZipDirectoryChild),
+
+    pub fn iterate(self: ZipDirectory) std.StringHashMap(ZipDirectoryChild).ValueIterator {
+        return self.children.valueIterator();
+    }
+
+    pub fn getDir(self: *ZipDirectory, path: []const u8) !*ZipDirectory {
+        var dir = self;
+        var parts = std.mem.split(path, "/");
+
+        while (parts.next()) |part| {
+            if (dir.children.get(part)) |p| {
+                dir = p.directory;
+            } else return error.NotFound;
+        }
+
+        return dir;
+    }
+
+    pub fn getFile(self: *ZipDirectory, path: []const u8) !*ZipFile {
+        var dir = self;
+        var parts = std.mem.split(path, "/");
+
+        while (parts.next()) |part| {
+            std.log.info("{s} {s}", .{ part, dir.name });
+            if (dir.children.get(part)) |p| {
+                if (parts.index == null) return p.file;
+                dir = p.directory;
+            } else return error.NotFound;
+        }
+
+        unreachable;
+    }
+};
+
+pub const FileTree = struct {
+    const Self = @This();
+
+    allocator: *std.mem.Allocator,
+    root_dir: ZipDirectory,
+
+    pub fn init(allocator: *std.mem.Allocator) Self {
+        return .{
+            .allocator = allocator,
+            .root_dir = .{
+                .name = "/",
+                .children = std.StringHashMap(ZipDirectoryChild).init(allocator),
+            },
+        };
+    }
+
+    pub fn appendFile(self: *Self, file: ZipFile) !void {
+        var parts = std.mem.split(file.name, "/");
+        var dir = &self.root_dir;
+
+        while (parts.next()) |part| {
+            if (parts.index == null) {
+                var f = try self.allocator.create(ZipFile);
+                f.* = file;
+                try dir.children.put(part, .{ .file = f });
+            } else {
+                var gpr = try dir.children.getOrPut(part);
+                if (gpr.found_existing) {
+                    dir = gpr.value_ptr.*.directory;
+                } else {
+                    var d = try self.allocator.create(ZipDirectory);
+                    d.* = .{
+                        .name = part,
+                        .children = std.StringHashMap(ZipDirectoryChild).init(self.allocator),
+                    };
+                    gpr.value_ptr.* = .{ .directory = d };
+                    dir = d;
+                }
+            }
+        }
+    }
+};
+
+pub fn Zip(comptime T: type) type {
+    return struct {
+        const Self = @This();
+
+        allocator: *std.mem.Allocator,
+        reader: T,
+        file_tree: FileTree,
+
+        pub fn init(allocator: *std.mem.Allocator, reader: T) !Self {
+            var start: usize = 0;
+            var end = try reader.context.getEndPos();
+
+            while (true) {
+                var first = try reader.readByte();
+                if (first != 'P') continue;
+                var second = try reader.readByte();
+                if (second != 'K') continue;
+
+                break;
+            }
+
+            start = (try reader.context.getPos()) + 2;
+
+            var offset: usize = 22;
+            while ((try reader.readIntLittle(u32)) != 0x06054b50) : (offset += 1)
+                try reader.context.seekTo(end - offset);
+
+            var eocd = try EndCentralDirectoryRecord.parse(reader);
+
+            try reader.context.seekTo(eocd.central_directory_offset + start);
+
+            var file_tree = FileTree.init(allocator);
+
+            var index: usize = 0;
+            while (index < eocd.total_central_directory_count) : (index += 1) {
+                var cdh = try CentralDirectoryHeader.parse(reader);
+
+                var name = try allocator.alloc(u8, cdh.filename_length);
+                _ = try reader.readAll(name);
+
+                try file_tree.appendFile(.{
+                    .name = name,
+                    .offset = try reader.context.getPos(),
+                });
+
+                try reader.context.seekBy(cdh.extra_field_length + cdh.file_comment_length + 4); // 4 is for the signature of the next directory btw
+            }
+
+            return Self{
+                .allocator = allocator,
+                .reader = reader,
+                .file_tree = file_tree,
+            };
+        }
+
+        pub fn openDir(self: *Self) ZipDirectory {}
+    };
+}
