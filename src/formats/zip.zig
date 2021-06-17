@@ -1,7 +1,23 @@
 const std = @import("std");
 const mem = std.mem;
 
-const compression = @import("compression.zig");
+pub const CompressionMethod = enum(u16) {
+    none = 0,
+    shrunk = 1,
+    rwcf1 = 2,
+    rwcf2 = 3,
+    rwcf3 = 4,
+    rwcf4 = 5,
+    imploded = 6,
+    deflated = 8,
+    enhanced_deflated = 9,
+    pkware_dcl_imploded = 10,
+    bzip2 = 12,
+    lzma = 14,
+    ibm_terse = 18,
+    ibm_lz77_z = 19,
+    ppmd_version_i_rev_1 = 98,
+};
 
 pub const LocalFileHeader = struct {
     pub const Signature = 0x04034b50;
@@ -11,7 +27,7 @@ pub const LocalFileHeader = struct {
 
     version_needed: u16,
     bit_flag: u16,
-    compression_method: u16,
+    compression_method: CompressionMethod,
 
     last_mod_time: u16,
     last_mod_date: u16,
@@ -32,7 +48,7 @@ pub const LocalFileHeader = struct {
 
         self.version_needed = mem.readIntLittle(u16, buf[0..2]);
         self.bit_flag = mem.readIntLittle(u16, buf[2..4]);
-        self.compression_method = mem.readIntLittle(u16, buf[4..6]);
+        self.compression_method = @intToEnum(CompressionMethod, mem.readIntLittle(u16, buf[4..6]));
 
         self.last_mod_time = mem.readIntLittle(u16, buf[6..8]);
         self.last_mod_date = mem.readIntLittle(u16, buf[8..10]);
@@ -264,6 +280,8 @@ pub const Parser = struct {
     file_headers: std.ArrayListUnmanaged(LocalFileHeader) = .{},
     string_buffer: std.ArrayListUnmanaged(u8) = .{},
 
+    file_tree: FileTree = FileTree{},
+
     pub fn init(allocator: *std.mem.Allocator, file: std.fs.File) Parser {
         return .{
             .allocator = allocator,
@@ -286,15 +304,12 @@ pub const Parser = struct {
             } else return err;
         };
 
-        if (self.is_zip64) {
-            const string_space = self.zip64_ecdr.central_directory_size - (46 * self.zip64_ecdr.central_directory_entry_count);
+        const string_space = if (self.is_zip64)
+            self.zip64_ecdr.central_directory_size - (46 * self.zip64_ecdr.central_directory_entry_count)
+        else
+            self.zip_ecdr.central_directory_size - (46 * @as(u32, self.zip_ecdr.central_directory_entry_count));
 
-            try self.string_buffer.ensureTotalCapacity(self.allocator, string_space);
-        } else {
-            const string_space = self.zip_ecdr.central_directory_size - (46 * @as(u32, self.zip_ecdr.central_directory_entry_count));
-
-            try self.string_buffer.ensureTotalCapacity(self.allocator, string_space);
-        }
+        try self.string_buffer.ensureTotalCapacity(self.allocator, string_space);
 
         try self.readCentralDirectory();
     }
@@ -397,6 +412,8 @@ pub const ZipDirectory = struct {
     }
 
     pub fn getDir(self: *ZipDirectory, path: []const u8) !*ZipDirectory {
+        if (std.mem.eql(u8, path, "/")) return self;
+
         var dir = self;
         var parts = std.mem.split(path, "/");
 
