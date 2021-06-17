@@ -1,216 +1,376 @@
 const std = @import("std");
+const mem = std.mem;
+
 const compression = @import("compression.zig");
 
-pub const DataDescriptor = packed struct {
-    const Self = @This();
+pub const LocalFileHeader = struct {
+    pub const Signature = 0x04034b50;
 
-    uncompressed_checksum: u32,
+    parser: *Parser,
+    location: usize,
+
+    version_needed: u16,
+    bit_flag: u16,
+    compression_method: u16,
+
+    last_mod_time: u16,
+    last_mod_date: u16,
+
+    checksum: u32,
     compressed_size: u32,
     uncompressed_size: u32,
 
-    pub fn parse(reader: anytype) !Self {
-        return try reader.readStruct(Self);
+    filename_len: u16,
+    extrafield_len: u16,
+
+    pub fn parse(self: *LocalFileHeader, parser: *Parser) !void {
+        self.parser = parser;
+        self.location = try parser.file.getPos() - 4;
+
+        var buf: [26]u8 = undefined;
+        _ = try parser.reader.readAll(&buf);
+
+        self.version_needed = mem.readIntLittle(u16, buf[0..2]);
+        self.bit_flag = mem.readIntLittle(u16, buf[2..4]);
+        self.compression_method = mem.readIntLittle(u16, buf[4..6]);
+
+        self.last_mod_time = mem.readIntLittle(u16, buf[6..8]);
+        self.last_mod_date = mem.readIntLittle(u16, buf[8..10]);
+
+        self.checksum = mem.readIntLittle(u32, buf[10..14]);
+        self.compressed_size = mem.readIntLittle(u32, buf[14..18]);
+        self.uncompressed_size = mem.readIntLittle(u32, buf[18..22]);
+
+        self.filename_len = mem.readIntLittle(u16, buf[22..24]);
+        self.extrafield_len = mem.readIntLittle(u16, buf[24..26]);
+
+        try parser.file.seekBy(self.filename_len + self.extrafield_len);
     }
 };
 
-pub const LocalFileHeader = packed struct {
-    const Self = @This();
+pub const DataDescriptor = struct {
+    pub const Signature = 0x04034b50;
 
-    /// Minimum version of the zip spec required.
-    min_version: u16,
-    /// General purpose bit flag.
-    bit_flag: u16,
-    /// The method used to compress this file.
-    compression_method: compression.CompressionMethod,
+    parser: *Parser,
+    location: usize,
 
-    last_modified_time: u16,
-    last_modified_date: u16,
-
-    /// CRC-32 of uncompressed data.
-    uncompressed_checksum: u32,
-    /// Compressed size (or 0xffffffff for ZIP64)
+    checksum: u32,
     compressed_size: u32,
-
-    /// Uncompressed size (or 0xffffffff for ZIP64)
     uncompressed_size: u32,
-    filename_length: u16,
-    extra_field_length: u16,
 
-    pub fn parse(reader: anytype) !Self {
-        return try reader.readStruct(Self);
+    pub fn parse(self: *DataDescriptor, parser: *Parser) !void {
+        self.parser = parser;
+        self.location = try reader.context.getPos() - 4;
+
+        var buf: [12]u8 = undefined;
+        _ = try parser.reader.readAll(&buf);
+
+        self.checksum = mem.readIntLittle(u32, buf[0..4]);
+        self.compressed_size = mem.readIntLittle(u32, buf[4..8]);
+        self.uncompressed_size = mem.readIntLittle(u32, buf[8..12]);
+    }
+};
+
+pub const CentralDirectoryHeader = struct {
+    pub const Signature = 0x02014b50;
+
+    parser: *Parser,
+    location: usize,
+
+    version_made: u16,
+    version_needed: u16,
+    bit_flag: u16,
+    compression_method: u16,
+
+    last_mod_time: u16,
+    last_mod_date: u16,
+
+    checksum: u32,
+    compressed_size: u32,
+    uncompressed_size: u32,
+
+    filename_len: u16,
+    extrafield_len: u16,
+    file_comment_len: u16,
+
+    disk_start: u16,
+    internal_attributes: u16,
+    external_attributes: u32,
+
+    data_offset: u32,
+
+    filename: []const u8,
+    extrafield: []const u8,
+    file_comment: []const u8,
+
+    pub fn parse(self: *CentralDirectoryHeader, parser: *Parser, reader: anytype, position: usize) !usize {
+        self.parser = parser;
+        self.location = position - 4;
+
+        var buf: [42]u8 = undefined;
+        _ = try reader.readAll(&buf);
+
+        self.version_made = mem.readIntLittle(u16, buf[0..2]);
+        self.version_needed = mem.readIntLittle(u16, buf[2..4]);
+        self.bit_flag = mem.readIntLittle(u16, buf[4..6]);
+        self.compression_method = mem.readIntLittle(u16, buf[6..8]);
+
+        self.last_mod_time = mem.readIntLittle(u16, buf[8..10]);
+        self.last_mod_date = mem.readIntLittle(u16, buf[10..12]);
+
+        self.checksum = mem.readIntLittle(u32, buf[12..16]);
+        self.compressed_size = mem.readIntLittle(u32, buf[16..20]);
+        self.uncompressed_size = mem.readIntLittle(u32, buf[20..24]);
+
+        self.filename_len = mem.readIntLittle(u16, buf[24..26]);
+        self.extrafield_len = mem.readIntLittle(u16, buf[26..28]);
+        self.file_comment_len = mem.readIntLittle(u16, buf[28..30]);
+
+        self.disk_start = mem.readIntLittle(u16, buf[30..32]);
+        self.internal_attributes = mem.readIntLittle(u16, buf[32..34]);
+        self.external_attributes = mem.readIntLittle(u32, buf[34..38]);
+
+        self.data_offset = mem.readIntLittle(u32, buf[38..42]);
+
+        self.filename = try parser.readString(reader, self.filename_len);
+        self.extrafield = try parser.readString(reader, self.extrafield_len);
+        self.file_comment = try parser.readString(reader, self.file_comment_len);
+
+        return 42 + self.filename_len + self.extrafield_len + self.file_comment_len;
+    }
+};
+
+pub const EndCentralDirectory64Record = struct {
+    pub const Signature = 0x06064b50;
+
+    parser: *Parser,
+    location: usize,
+
+    size: u64,
+
+    version_made: u16,
+    version_needed: u16,
+
+    disk_number: u32,
+    disk_start_central_directory: u32,
+    disk_count_directory_entries: u64,
+
+    central_directory_entry_count: u64,
+    central_directory_size: u64,
+    central_directory_offset: u64,
+
+    pub fn parse(self: *EndCentralDirectory64Record, parser: *Parser) !usize {
+        self.parser = parser;
+        self.location = (try parser.file.getPos()) - 4;
+
+        var buf: [52]u8 = undefined;
+        _ = try parser.reader.readAll(&buf);
+
+        self.size = mem.readIntLittle(u64, buf[0..8]);
+
+        self.version_made = mem.readIntLittle(u16, buf[8..10]);
+        self.disk_count_directory_entries = mem.readIntLittle(u16, buf[10..12]);
+
+        self.disk_number = mem.readIntLittle(u32, buf[12..16]);
+        self.disk_start_central_directory = mem.readIntLittle(u32, buf[16..20]);
+        self.disk_count_directory_entries = mem.readIntLittle(u64, buf[20..28]);
+
+        self.central_directory_entry_count = mem.readIntLittle(u64, buf[28..36]);
+        self.central_directory_size = mem.readIntLittle(u64, buf[36..44]);
+        self.central_directory_offset = mem.readIntLittle(u64, buf[44..52]);
+
+        try parser.file.seekBy(self.size - 44);
+
+        return 12 + self.size;
+    }
+};
+
+pub const EndCentralDirectory64Locator = struct {
+    pub const Signature = 0x07064b50;
+
+    parser: *Parser,
+    location: usize,
+
+    disk_number: u32,
+    ecd64_offset: u64,
+    number_of_disks: u32,
+
+    pub fn parse(self: *EndCentralDirectory64Locator, parser: *Parser) !usize {
+        self.parser = parser;
+        self.location = (try parser.file.getPos()) - 4;
+
+        var buf: [16]u8 = undefined;
+        _ = try parser.reader.readAll(&buf);
+
+        self.disk_number = mem.readIntLittle(u32, buf[0..4]);
+        self.ecd64_offset = mem.readIntLittle(u64, buf[4..12]);
+        self.number_of_disks = mem.readIntLittle(u32, buf[12..16]);
+
+        return 16;
+    }
+};
+
+pub const EndCentralDirectoryRecord = struct {
+    pub const Signature = 0x06054b50;
+
+    parser: *Parser,
+    location: usize,
+
+    disk_number: u16,
+    disk_start_central_directory: u16,
+    disk_count_directory_entries: u16,
+
+    central_directory_entry_count: u16,
+    central_directory_size: u32,
+    central_directory_offset: u32,
+
+    comment_length: u16,
+
+    pub fn parse(self: *EndCentralDirectoryRecord, parser: *Parser) !usize {
+        self.parser = parser;
+        self.location = (try parser.file.getPos()) - 4;
+
+        var buf: [18]u8 = undefined;
+        _ = try parser.reader.readAll(&buf);
+
+        self.disk_number = mem.readIntLittle(u16, buf[0..2]);
+        self.disk_start_central_directory = mem.readIntLittle(u16, buf[2..4]);
+        self.disk_count_directory_entries = mem.readIntLittle(u16, buf[4..6]);
+
+        self.central_directory_entry_count = mem.readIntLittle(u16, buf[6..8]);
+        self.central_directory_size = mem.readIntLittle(u32, buf[8..12]);
+        self.central_directory_offset = mem.readIntLittle(u32, buf[12..16]);
+
+        self.comment_length = mem.readIntLittle(u16, buf[16..18]);
+
+        try parser.file.seekBy(self.comment_length);
+
+        return 18 + self.comment_length;
+    }
+};
+
+pub const Parser = struct {
+    allocator: *std.mem.Allocator,
+
+    file: std.fs.File,
+    reader: std.fs.File.Reader,
+
+    is_zip64: bool = false,
+    zip_ecdr: EndCentralDirectoryRecord = undefined,
+    zip64_ecdl: EndCentralDirectory64Locator = undefined,
+    zip64_ecdr: EndCentralDirectory64Record = undefined,
+
+    central_directory: std.ArrayListUnmanaged(CentralDirectoryHeader) = .{},
+    file_headers: std.ArrayListUnmanaged(LocalFileHeader) = .{},
+    string_buffer: std.ArrayListUnmanaged(u8) = .{},
+
+    pub fn init(allocator: *std.mem.Allocator, file: std.fs.File) Parser {
+        return .{
+            .allocator = allocator,
+
+            .file = file,
+            .reader = file.reader(),
+        };
     }
 
-    pub fn readFilenameArrayList(self: Self, reader: anytype, array_list: *std.ArrayList(u8)) ![]u8 {
-        try array_list.ensureTotalCapacity(self.filename_length);
-        array_list.expandToCapacity();
-
-        var read = try reader.readAll(array_list.items[0..self.filename_length]);
-        return array_list.items[0..read];
+    pub fn deinit(self: *Parser) void {
+        self.central_directory.deinit(self.allocator);
+        self.file_headers.deinit(self.allocator);
+        self.string_buffer.deinit(self.allocator);
     }
 
-    pub fn readExtraFieldArrayList(self: Self, reader: anytype, array_list: *std.ArrayList(u8)) ![]u8 {
-        try array_list.ensureTotalCapacity(self.extra_field_length);
-        array_list.expandToCapacity();
+    pub fn load(self: *Parser) !void {
+        self.loadZip64() catch |err| {
+            if (err == error.InvalidZip64) {
+                try self.loadZip();
+            } else return err;
+        };
 
-        var read = try reader.readAll(array_list.items[0..self.extra_field_length]);
-        return array_list.items[0..read];
-    }
+        if (self.is_zip64) {
+            const string_space = self.zip64_ecdr.central_directory_size - (46 * self.zip64_ecdr.central_directory_entry_count);
 
-    pub fn decompressArrayList(self: Self, reader: anytype, array_list: *std.ArrayList(u8)) ![]u8 {
-        try array_list.ensureTotalCapacity(self.uncompressed_size);
-        array_list.expandToCapacity();
+            try self.string_buffer.ensureTotalCapacity(self.allocator, string_space);
+        } else {
+            const string_space = self.zip_ecdr.central_directory_size - (46 * @as(u32, self.zip_ecdr.central_directory_entry_count));
 
-        switch (self.compression_method) {
-            .none => {
-                var read = try reader.readAll(array_list.items[0..self.uncompressed_size]);
-                return array_list.items[0..read];
-            },
-            .deflated => {
-                var window: [0x8000]u8 = undefined;
-                var stream = std.compress.deflate.inflateStream(reader, &window);
-                var read = try stream.reader().readAll(array_list.items[0..self.uncompressed_size]);
-                return array_list.items[0..read];
-            },
-            else => {
-                std.log.crit("bidoof this method isn't implemented! {s}", .{self.compression_method});
-                return error.MethodNotImplemented;
-            },
+            try self.string_buffer.ensureTotalCapacity(self.allocator, string_space);
         }
+
+        try self.readCentralDirectory();
     }
 
-    pub fn needsDataDescriptor(self: Self) bool {
-        return self.bit_flag & 0x08 == 0x08;
+    fn readString(self: *Parser, reader: anytype, len: usize) ![]const u8 {
+        std.debug.assert(self.string_buffer.items.len + len <= self.string_buffer.capacity);
+        const prev_len = self.string_buffer.items.len;
+        self.string_buffer.items.len += len;
+
+        var buf = self.string_buffer.items[prev_len..][0..len];
+        _ = try reader.readAll(buf);
+
+        return buf;
     }
 
-    pub fn parseDataDescriptor(self: Self, reader: anytype) !DataDescriptor {
-        while (true) {
-            var first = try reader.readByte();
-            if (first != 'P') continue;
-            var second = try reader.readByte();
-            if (second != 'K') continue;
+    fn findSignature(self: *Parser, sig: u32, start_offset: u64) !u64 {
+        const end = try self.file.getEndPos();
+        var offset = start_offset;
 
-            var buf: [2]u8 = undefined;
-            var rest = try reader.readAll(&buf);
+        if (end < offset) return error.InvalidFormat;
 
-            if ((buf[0] == 0x03 and buf[1] == 0x04) or (buf[0] == 0x01 and buf[1] == 0x02)) {
-                try reader.context.seekBy(-16);
-                return DataDescriptor.parse(reader);
+        while (offset < end and offset < 1024) : (offset += 1) {
+            if ((try self.reader.readIntLittle(u32)) != sig) {
+                try self.file.seekTo(end - offset);
+            } else {
+                return end - offset;
             }
         }
 
-        return error.DataDescriptorNotFound;
-    }
-};
-
-pub const CentralDirectoryHeader = packed struct {
-    const Self = @This();
-
-    made_by_version: u16,
-    min_version: u16,
-
-    bit_flag: u16,
-    compression_method: compression.CompressionMethod,
-
-    last_modified_time: u16,
-    last_modified_date: u16,
-
-    /// CRC-32 of uncompressed data.
-    uncompressed_checksum: u32,
-    /// Compressed size (or 0xffffffff for ZIP64)
-    compressed_size: u32,
-
-    /// Uncompressed size (or 0xffffffff for ZIP64)
-    uncompressed_size: u32,
-    filename_length: u16,
-    extra_field_length: u16,
-    file_comment_length: u16,
-    disk_number_start: u16,
-
-    internal_file_attributes: u16,
-    external_file_attributes: u32,
-
-    relative_offset: u32,
-
-    pub fn parse(reader: anytype) !Self {
-        return try reader.readStruct(Self);
+        return error.InvalidZip;
     }
 
-    pub fn readFilenameArrayList(self: Self, reader: anytype, array_list: *std.ArrayList(u8)) ![]u8 {
-        try array_list.ensureTotalCapacity(self.filename_length);
-        array_list.expandToCapacity();
+    fn loadZip(self: *Parser) !void {
+        _ = self.findSignature(EndCentralDirectoryRecord.Signature, 22) catch return error.InvalidZip;
 
-        var read = try reader.readAll(array_list.items[0..self.filename_length]);
-        return array_list.items[0..read];
+        _ = try self.zip_ecdr.parse(self);
     }
 
-    pub fn readExtraFieldArrayList(self: Self, reader: anytype, array_list: *std.ArrayList(u8)) ![]u8 {
-        try array_list.ensureTotalCapacity(self.extra_field_length);
-        array_list.expandToCapacity();
+    fn loadZip64(self: *Parser) !void {
+        _ = self.findSignature(EndCentralDirectory64Locator.Signature, 22) catch return error.InvalidZip64;
 
-        var read = try reader.readAll(array_list.items[0..self.extra_field_length]);
-        return array_list.items[0..read];
+        _ = try self.zip64_ecdl.parse(self);
+
+        try self.file.seekTo(self.zip64_ecdl.location - self.zip64_ecdl.ecd64_offset);
+
+        const zip64_ecdr_sig = try self.reader.readIntLittle(u32);
+        if (zip64_ecdr_sig != EndCentralDirectory64Record.Signature) return error.InvalidZip64;
+
+        _ = try self.zip64_ecdl.parse(self);
+
+        self.is_zip64 = true;
     }
 
-    pub fn readFileCommentArrayList(self: Self, reader: anytype, array_list: *std.ArrayList(u8)) ![]u8 {
-        try array_list.ensureTotalCapacity(self.file_comment_length);
-        array_list.expandToCapacity();
+    fn readCentralDirectory(self: *Parser) !void {
+        if (self.is_zip64) {
+            std.debug.panic("zip64 unimplemented\n", .{});
+        } else {
+            const size = self.zip_ecdr.central_directory_entry_count;
+            try self.central_directory.ensureTotalCapacity(self.allocator, size);
 
-        var read = try reader.readAll(array_list.items[0..self.file_comment_length]);
-        return array_list.items[0..read];
-    }
-};
+            var index: u32 = 0;
+            var pos: usize = self.zip_ecdr.central_directory_offset;
+            try self.file.seekTo(pos);
 
-pub const EndCentralDirectoryRecord = packed struct {
-    const Self = @This();
+            var buffered = std.io.BufferedReader(8192, std.fs.File.Reader){ .unbuffered_reader = self.reader };
+            const reader = buffered.reader();
 
-    disk_number: u16,
-    central_directory_start_disk: u16,
-    disk_central_directory_count: u16,
-    total_central_directory_count: u16,
+            while (index < size) : (index += 1) {
+                const sig = try reader.readIntLittle(u32);
+                if (sig != CentralDirectoryHeader.Signature) return error.InvalidZip;
+                pos += 4;
 
-    central_directory_size: u32,
-    central_directory_offset: u32,
-    comment_length: u16,
+                var hdr = self.central_directory.addOneAssumeCapacity();
+                pos += try hdr.parse(self, reader, pos);
 
-    pub fn parse(reader: anytype) !Self {
-        return try reader.readStruct(Self);
-    }
-
-    pub fn readFileCommentArrayList(self: Self, reader: anytype, array_list: *std.ArrayList(u8)) ![]u8 {
-        try array_list.ensureTotalCapacity(self.file_comment_length);
-        array_list.expandToCapacity();
-
-        var read = try reader.readAll(array_list.items[0..self.file_comment_length]);
-        return array_list.items[0..read];
-    }
-};
-
-pub const Section = union(enum) {
-    const Self = @This();
-
-    /// 0x04034b50 (PK\x03\x04).
-    local_file_header: LocalFileHeader,
-    /// 0x02014b50 (PK\x01\x02).
-    central_directory_header: CentralDirectoryHeader,
-    /// 0x06054b50 (PK\x05\x06).
-    end_central_directory_record: EndCentralDirectoryRecord,
-
-    pub fn parse(reader: anytype) !Self {
-        while (true) {
-            var first = try reader.readByte();
-            if (first != 'P') continue;
-            var second = try reader.readByte();
-            if (second != 'K') continue;
-
-            var buf: [2]u8 = undefined;
-            var rest = try reader.readAll(&buf);
-
-            if (buf[0] == 0x03 and buf[1] == 0x04) {
-                return Self{ .local_file_header = try LocalFileHeader.parse(reader) };
-            } else if (buf[0] == 0x01 and buf[1] == 0x02) {
-                return Self{ .central_directory_header = try CentralDirectoryHeader.parse(reader) };
-            } else if (buf[0] == 0x05 and buf[1] == 0x06) {
-                return Self{ .end_central_directory_record = try EndCentralDirectoryRecord.parse(reader) };
+                try self.file_tree.appendFile(self.allocator, hdr);
             }
         }
     }
@@ -220,19 +380,19 @@ pub const Section = union(enum) {
 
 pub const ZipFile = struct {
     name: []const u8,
-    offset: u64,
+    header: *const CentralDirectoryHeader,
 };
 
 pub const ZipDirectoryChild = union(enum) {
-    directory: *ZipDirectory,
-    file: *ZipFile,
+    directory: ZipDirectory,
+    file: ZipFile,
 };
 
 pub const ZipDirectory = struct {
     name: []const u8,
-    children: std.StringHashMap(ZipDirectoryChild),
+    children: std.StringHashMapUnmanaged(ZipDirectoryChild) = .{},
 
-    pub fn iterate(self: ZipDirectory) std.StringHashMap(ZipDirectoryChild).ValueIterator {
+    pub fn iterate(self: ZipDirectory) std.StringHashMapUnmanaged(ZipDirectoryChild).ValueIterator {
         return self.children.valueIterator();
     }
 
@@ -268,101 +428,39 @@ pub const ZipDirectory = struct {
 pub const FileTree = struct {
     const Self = @This();
 
-    allocator: *std.mem.Allocator,
-    root_dir: ZipDirectory,
+    root_dir: ZipDirectory = .{
+        .name = "/",
+    },
 
-    pub fn init(allocator: *std.mem.Allocator) Self {
-        return .{
-            .allocator = allocator,
-            .root_dir = .{
-                .name = "/",
-                .children = std.StringHashMap(ZipDirectoryChild).init(allocator),
-            },
-        };
-    }
-
-    pub fn appendFile(self: *Self, file: ZipFile) !void {
-        var parts = std.mem.split(file.name, "/");
+    pub fn appendFile(self: *Self, allocator: *std.mem.Allocator, header: *CentralDirectoryHeader) !void {
+        var parts = std.mem.split(header.filename, "/");
         var dir = &self.root_dir;
 
         while (parts.next()) |part| {
-            if (parts.index == null) {
-                var f = try self.allocator.create(ZipFile);
-                f.* = file;
-                try dir.children.put(part, .{ .file = f });
-            } else {
-                var gpr = try dir.children.getOrPut(part);
-                if (gpr.found_existing) {
-                    dir = gpr.value_ptr.*.directory;
-                } else {
-                    var d = try self.allocator.create(ZipDirectory);
-                    d.* = .{
-                        .name = part,
-                        .children = std.StringHashMap(ZipDirectoryChild).init(self.allocator),
+            if (part.len > 0) {
+                if (parts.index == null) {
+                    const result = try dir.children.getOrPut(allocator, part);
+                    result.value_ptr.* = .{
+                        .file = .{
+                            .name = part,
+                            .header = header,
+                        },
                     };
-                    gpr.value_ptr.* = .{ .directory = d };
-                    dir = d;
+                } else {
+                    const result = try dir.children.getOrPut(allocator, part);
+                    if (result.found_existing) {
+                        dir = &result.value_ptr.directory;
+                    } else {
+                        result.value_ptr.* = .{
+                            .directory = .{
+                                .name = part,
+                            },
+                        };
+
+                        dir = &result.value_ptr.directory;
+                    }
                 }
             }
         }
     }
 };
-
-pub fn Zip(comptime T: type) type {
-    return struct {
-        const Self = @This();
-
-        allocator: *std.mem.Allocator,
-        reader: T,
-        file_tree: FileTree,
-
-        pub fn init(allocator: *std.mem.Allocator, reader: T) !Self {
-            var start: usize = 0;
-            var end = try reader.context.getEndPos();
-
-            while (true) {
-                var first = try reader.readByte();
-                if (first != 'P') continue;
-                var second = try reader.readByte();
-                if (second != 'K') continue;
-
-                break;
-            }
-
-            start = (try reader.context.getPos()) + 2;
-
-            var offset: usize = 22;
-            while ((try reader.readIntLittle(u32)) != 0x06054b50) : (offset += 1)
-                try reader.context.seekTo(end - offset);
-
-            var eocd = try EndCentralDirectoryRecord.parse(reader);
-
-            try reader.context.seekTo(eocd.central_directory_offset + start);
-
-            var file_tree = FileTree.init(allocator);
-
-            var index: usize = 0;
-            while (index < eocd.total_central_directory_count) : (index += 1) {
-                var cdh = try CentralDirectoryHeader.parse(reader);
-
-                var name = try allocator.alloc(u8, cdh.filename_length);
-                _ = try reader.readAll(name);
-
-                try file_tree.appendFile(.{
-                    .name = name,
-                    .offset = try reader.context.getPos(),
-                });
-
-                try reader.context.seekBy(cdh.extra_field_length + cdh.file_comment_length + 4); // 4 is for the signature of the next directory btw
-            }
-
-            return Self{
-                .allocator = allocator,
-                .reader = reader,
-                .file_tree = file_tree,
-            };
-        }
-
-        pub fn openDir(self: *Self) ZipDirectory {}
-    };
-}
