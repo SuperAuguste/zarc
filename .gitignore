@@ -2,3 +2,4 @@
 /zig-out
 
 *.zip
+*.jmod

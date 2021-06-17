@@ -271,6 +271,8 @@ pub const Parser = struct {
     file: std.fs.File,
     reader: std.fs.File.Reader,
 
+    start_offset: usize = 0,
+
     is_zip64: bool = false,
     zip_ecdr: EndCentralDirectoryRecord = undefined,
     zip64_ecdl: EndCentralDirectory64Locator = undefined,
@@ -363,7 +365,30 @@ pub const Parser = struct {
         self.is_zip64 = true;
     }
 
+    fn findStart(self: *Parser) !void {
+        var original_position = try self.file.getPos();
+        try self.file.seekTo(0);
+
+        while (true) {
+            var first = try self.reader.readByte();
+            if (first != 'P') continue;
+            var second = try self.reader.readByte();
+            if (second != 'K') continue;
+
+            break;
+        }
+
+        self.start_offset = (try self.file.getPos()) - 2;
+        try self.file.seekTo(original_position);
+    }
+
     fn readCentralDirectory(self: *Parser) !void {
+        // Gets the start of the actual ZIP.
+        // This is required because ZIPs can have preambles for self-execution, for example
+        // so they could actually start anywhere in a `.zip` file.
+        try self.findStart();
+
+        // Actually begin parsing the central directory
         if (self.is_zip64) {
             std.debug.panic("zip64 unimplemented\n", .{});
         } else {
@@ -371,7 +396,7 @@ pub const Parser = struct {
             try self.central_directory.ensureTotalCapacity(self.allocator, size);
 
             var index: u32 = 0;
-            var pos: usize = self.zip_ecdr.central_directory_offset;
+            var pos: usize = self.start_offset + self.zip_ecdr.central_directory_offset;
             try self.file.seekTo(pos);
 
             var buffered = std.io.BufferedReader(8192, std.fs.File.Reader){ .unbuffered_reader = self.reader };
@@ -396,6 +421,27 @@ pub const Parser = struct {
 pub const ZipFile = struct {
     name: []const u8,
     header: *const CentralDirectoryHeader,
+
+    pub fn decompress(self: ZipFile, buffer: []u8) !void {
+        var file_header = self.header.data_offset;
+
+        switch (self.compression_method) {
+            .none => {
+                var read = try reader.readAll(array_list.items[0..self.uncompressed_size]);
+                return array_list.items[0..read];
+            },
+            .deflated => {
+                var window: [0x8000]u8 = undefined;
+                var stream = std.compress.deflate.inflateStream(reader, &window);
+                var read = try stream.reader().readAll(array_list.items[0..self.uncompressed_size]);
+                return array_list.items[0..read];
+            },
+            else => {
+                std.log.crit("bidoof this method isn't implemented! {s}", .{self.compression_method});
+                return error.MethodNotImplemented;
+            },
+        }
+    }
 };
 
 pub const ZipDirectoryChild = union(enum) {

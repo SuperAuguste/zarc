@@ -4,7 +4,7 @@ const zip = @import("formats/zip.zig");
 pub fn main() anyerror!void {
     const allocator = std.heap.page_allocator;
 
-    var zip_file = try std.fs.cwd().openFile("zig-windows.zip", .{});
+    var zip_file = try std.fs.cwd().openFile("java.base.jmod", .{});
 
     var start = std.time.milliTimestamp();
 
