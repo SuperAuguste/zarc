@@ -41,7 +41,7 @@ pub const LocalFileHeader = struct {
 
     pub fn parse(self: *LocalFileHeader, parser: *Parser) !void {
         self.parser = parser;
-        self.location = try parser.file.getPos() - 4;
+        self.location = (try parser.file.getPos()) - 4;
 
         var buf: [26]u8 = undefined;
         _ = try parser.reader.readAll(&buf);
@@ -61,6 +61,42 @@ pub const LocalFileHeader = struct {
         self.extrafield_len = mem.readIntLittle(u16, buf[24..26]);
 
         try parser.file.seekBy(self.filename_len + self.extrafield_len);
+
+        if (self.bit_flag & 0x08 == 0x08) {
+            var curr = try self.parser.file.getPos();
+
+            var data_descriptor_sigs = [_]u32{ LocalFileHeader.Signature, CentralDirectoryHeader.Signature, DataDescriptor.Signature };
+            var sig_result = try self.parser.matchSignature(&data_descriptor_sigs, curr, .forwards);
+
+            if (sig_result.signature != DataDescriptor.Signature)
+                try self.parser.reader.context.seekBy(-16);
+
+            var data_descriptor: DataDescriptor = undefined;
+            try DataDescriptor.parse(&data_descriptor, self.parser);
+
+            self.checksum = data_descriptor.checksum;
+            self.compressed_size = data_descriptor.compressed_size;
+            self.uncompressed_size = data_descriptor.uncompressed_size;
+
+            try parser.file.seekTo(curr);
+        }
+    }
+
+    pub fn decompress(self: *const LocalFileHeader, buffer: []u8) !usize {
+        switch (self.compression_method) {
+            .none => {
+                return try self.parser.reader.readAll(buffer[0..self.uncompressed_size]);
+            },
+            .deflated => {
+                var window: [0x8000]u8 = undefined;
+                var stream = std.compress.deflate.inflateStream(self.parser.reader, &window);
+                return try stream.reader().readAll(buffer[0..self.uncompressed_size]);
+            },
+            else => {
+                std.log.crit("bidoof this method isn't implemented! {s}", .{self.compression_method});
+                return error.MethodNotImplemented;
+            },
+        }
     }
 };
 
@@ -76,7 +112,7 @@ pub const DataDescriptor = struct {
 
     pub fn parse(self: *DataDescriptor, parser: *Parser) !void {
         self.parser = parser;
-        self.location = try reader.context.getPos() - 4;
+        self.location = (try parser.reader.context.getPos()) - 4;
 
         var buf: [12]u8 = undefined;
         _ = try parser.reader.readAll(&buf);
@@ -153,6 +189,15 @@ pub const CentralDirectoryHeader = struct {
         self.file_comment = try parser.readString(reader, self.file_comment_len);
 
         return 42 + self.filename_len + self.extrafield_len + self.file_comment_len;
+    }
+
+    pub fn readLocalFileHeader(self: *const CentralDirectoryHeader) !LocalFileHeader {
+        try self.parser.file.seekTo(self.parser.start_offset + self.data_offset + 4);
+
+        var lfh: LocalFileHeader = undefined;
+        try LocalFileHeader.parse(&lfh, self.parser);
+
+        return lfh;
     }
 };
 
@@ -297,6 +342,7 @@ pub const Parser = struct {
         self.central_directory.deinit(self.allocator);
         self.file_headers.deinit(self.allocator);
         self.string_buffer.deinit(self.allocator);
+        self.file_tree.root_dir.deinit(self.allocator);
     }
 
     pub fn load(self: *Parser) !void {
@@ -327,31 +373,43 @@ pub const Parser = struct {
         return buf;
     }
 
-    fn findSignature(self: *Parser, sig: u32, start_offset: u64) !u64 {
-        const end = try self.file.getEndPos();
-        var offset = start_offset;
+    const SignatureDirection = enum { forwards, backwards };
+    const SignatureResult = struct { offset: u64, signature: u32 };
+
+    /// NOTE: This is a great utility method, but it's also pretty slow
+    /// for signatures > 1 because `for (signatures)` is not inlinable (LLVM crashes if you try to inline it).
+    /// Sadly, this is the only way to properly find signatures, so it's *slight* a tradeoff we've gotta absorb. :(
+    fn matchSignature(self: *Parser, signatures: []u32, start_offset: u64, direction: SignatureDirection) !SignatureResult {
+        const end = if (direction == .backwards) try self.file.getEndPos() else start_offset;
+        var offset = if (direction == .backwards) start_offset else 0;
 
         if (end < offset) return error.InvalidFormat;
 
-        while (offset < end and offset < 1024) : (offset += 1) {
-            if ((try self.reader.readIntLittle(u32)) != sig) {
-                try self.file.seekTo(end - offset);
-            } else {
-                return end - offset;
+        while (((direction == .backwards and offset < end) or (direction == .forwards)) and offset < 1024) : (offset += 1) {
+            for (signatures) |sig| {
+                if ((try self.reader.readIntLittle(u32)) != sig) {
+                    try self.file.seekTo(if (direction == .backwards) end - offset else end + offset);
+                } else {
+                    return SignatureResult{ .offset = if (direction == .backwards) end - offset else end + offset, .signature = sig };
+                }
             }
         }
 
         return error.InvalidZip;
     }
 
+    fn findSignature(self: *Parser, sig: u32, start_offset: u64, direction: SignatureDirection) !u64 {
+        return (try self.matchSignature(&[_]u32{sig}, start_offset, direction)).offset;
+    }
+
     fn loadZip(self: *Parser) !void {
-        _ = self.findSignature(EndCentralDirectoryRecord.Signature, 22) catch return error.InvalidZip;
+        _ = self.findSignature(EndCentralDirectoryRecord.Signature, 22, .backwards) catch return error.InvalidZip;
 
         _ = try self.zip_ecdr.parse(self);
     }
 
     fn loadZip64(self: *Parser) !void {
-        _ = self.findSignature(EndCentralDirectory64Locator.Signature, 22) catch return error.InvalidZip64;
+        _ = self.findSignature(EndCentralDirectory64Locator.Signature, 22, .backwards) catch return error.InvalidZip64;
 
         _ = try self.zip64_ecdl.parse(self);
 
@@ -369,16 +427,10 @@ pub const Parser = struct {
         var original_position = try self.file.getPos();
         try self.file.seekTo(0);
 
-        while (true) {
-            var first = try self.reader.readByte();
-            if (first != 'P') continue;
-            var second = try self.reader.readByte();
-            if (second != 'K') continue;
+        var start_sigs = [_]u32{ LocalFileHeader.Signature, CentralDirectoryHeader.Signature, EndCentralDirectoryRecord.Signature };
+        _ = try self.matchSignature(&start_sigs, 0, .forwards);
 
-            break;
-        }
-
-        self.start_offset = (try self.file.getPos()) - 2;
+        self.start_offset = (try self.file.getPos()) - 4;
         try self.file.seekTo(original_position);
     }
 
@@ -422,25 +474,8 @@ pub const ZipFile = struct {
     name: []const u8,
     header: *const CentralDirectoryHeader,
 
-    pub fn decompress(self: ZipFile, buffer: []u8) !void {
-        var file_header = self.header.data_offset;
-
-        switch (self.compression_method) {
-            .none => {
-                var read = try reader.readAll(array_list.items[0..self.uncompressed_size]);
-                return array_list.items[0..read];
-            },
-            .deflated => {
-                var window: [0x8000]u8 = undefined;
-                var stream = std.compress.deflate.inflateStream(reader, &window);
-                var read = try stream.reader().readAll(array_list.items[0..self.uncompressed_size]);
-                return array_list.items[0..read];
-            },
-            else => {
-                std.log.crit("bidoof this method isn't implemented! {s}", .{self.compression_method});
-                return error.MethodNotImplemented;
-            },
-        }
+    pub fn readLocalFileHeader(self: *const ZipFile) !LocalFileHeader {
+        return self.header.readLocalFileHeader();
     }
 };
 
@@ -472,19 +507,28 @@ pub const ZipDirectory = struct {
         return dir;
     }
 
-    pub fn getFile(self: *ZipDirectory, path: []const u8) !*ZipFile {
-        var dir = self;
+    pub fn getFile(self: *ZipDirectory, path: []const u8) !*const ZipFile {
+        var dir: *const ZipDirectory = self;
         var parts = std.mem.split(path, "/");
 
         while (parts.next()) |part| {
             std.log.info("{s} {s}", .{ part, dir.name });
             if (dir.children.get(part)) |p| {
-                if (parts.index == null) return p.file;
-                dir = p.directory;
+                if (parts.index == null) return &p.file;
+                dir = &p.directory;
             } else return error.NotFound;
         }
 
         unreachable;
+    }
+
+    pub fn deinit(self: *ZipDirectory, allocator: *std.mem.Allocator) void {
+        var itt = self.iterate();
+        while (itt.next()) |entry| switch (entry.*) {
+            .file => |file| {},
+            .directory => |*dir| dir.deinit(allocator),
+        };
+        self.children.deinit(allocator);
     }
 };
 
