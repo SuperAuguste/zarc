@@ -454,6 +454,8 @@ pub const Parser = struct {
             var buffered = std.io.BufferedReader(8192, std.fs.File.Reader){ .unbuffered_reader = self.reader };
             const reader = buffered.reader();
 
+            try self.file_tree.entries.ensureCapacity(self.allocator, size);
+
             while (index < size) : (index += 1) {
                 const sig = try reader.readIntLittle(u32);
                 if (sig != CentralDirectoryHeader.Signature) return error.InvalidZip;
@@ -470,104 +472,31 @@ pub const Parser = struct {
 
 // High-level constructs
 
-pub const ZipFile = struct {
-    name: []const u8,
-    header: *const CentralDirectoryHeader,
-
-    pub fn readLocalFileHeader(self: *const ZipFile) !LocalFileHeader {
-        return self.header.readLocalFileHeader();
-    }
-};
-
-pub const ZipDirectoryChild = union(enum) {
-    directory: ZipDirectory,
-    file: ZipFile,
-};
-
-pub const ZipDirectory = struct {
-    name: []const u8,
-    children: std.StringHashMapUnmanaged(ZipDirectoryChild) = .{},
-
-    pub fn iterate(self: ZipDirectory) std.StringHashMapUnmanaged(ZipDirectoryChild).ValueIterator {
-        return self.children.valueIterator();
-    }
-
-    pub fn getDir(self: *ZipDirectory, path: []const u8) !*ZipDirectory {
-        if (std.mem.eql(u8, path, "/")) return self;
-
-        var dir = self;
-        var parts = std.mem.split(path, "/");
-
-        while (parts.next()) |part| {
-            if (dir.children.get(part)) |p| {
-                dir = p.directory;
-            } else return error.NotFound;
-        }
-
-        return dir;
-    }
-
-    pub fn getFile(self: *ZipDirectory, path: []const u8) !*const ZipFile {
-        var dir: *const ZipDirectory = self;
-        var parts = std.mem.split(path, "/");
-
-        while (parts.next()) |part| {
-            std.log.info("{s} {s}", .{ part, dir.name });
-            if (dir.children.get(part)) |p| {
-                if (parts.index == null) return &p.file;
-                dir = &p.directory;
-            } else return error.NotFound;
-        }
-
-        unreachable;
-    }
-
-    pub fn deinit(self: *ZipDirectory, allocator: *std.mem.Allocator) void {
-        var itt = self.iterate();
-        while (itt.next()) |entry| switch (entry.*) {
-            .file => |file| {},
-            .directory => |*dir| dir.deinit(allocator),
-        };
-        self.children.deinit(allocator);
-    }
-};
-
 pub const FileTree = struct {
-    const Self = @This();
+    entries: std.StringHashMapUnmanaged(*const CentralDirectoryHeader) = .{},
+    structure: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(*const CentralDirectoryHeader)) = .{},
 
-    root_dir: ZipDirectory = .{
-        .name = "/",
-    },
+    pub fn appendFile(self: *FileTree, allocator: *std.mem.Allocator, hdr: *const CentralDirectoryHeader) !void {
+        // Determines the end of filename. If the filename is a directory, skip the last character as it is an extraenous `/`, else do nothing.
+        var filename_end_index = hdr.filename.len - if (hdr.filename[hdr.filename.len - 1] == '/') @as(usize, 1) else @as(usize, 0);
+        var start = if (std.mem.lastIndexOf(u8, hdr.filename[0..filename_end_index], "/")) |ind|
+            hdr.filename[0..ind]
+        else
+            "/";
 
-    pub fn appendFile(self: *Self, allocator: *std.mem.Allocator, header: *CentralDirectoryHeader) !void {
-        var parts = std.mem.split(header.filename, "/");
-        var dir = &self.root_dir;
+        var gpr = try self.structure.getOrPut(allocator, start);
+        if (!gpr.found_existing)
+            gpr.value_ptr.* = std.ArrayListUnmanaged(*const CentralDirectoryHeader){};
+        try gpr.value_ptr.append(allocator, hdr);
 
-        while (parts.next()) |part| {
-            if (part.len > 0) {
-                if (parts.index == null) {
-                    const result = try dir.children.getOrPut(allocator, part);
-                    result.value_ptr.* = .{
-                        .file = .{
-                            .name = part,
-                            .header = header,
-                        },
-                    };
-                } else {
-                    const result = try dir.children.getOrPut(allocator, part);
-                    if (result.found_existing) {
-                        dir = &result.value_ptr.directory;
-                    } else {
-                        result.value_ptr.* = .{
-                            .directory = .{
-                                .name = part,
-                            },
-                        };
+        try self.entries.put(allocator, hdr.filename, hdr);
+    }
 
-                        dir = &result.value_ptr.directory;
-                    }
-                }
-            }
-        }
+    pub fn readDir(self: *const FileTree, path: []const u8) ?*std.ArrayListUnmanaged(*const CentralDirectoryHeader) {
+        return if (self.structure.getEntry(path)) |ent| ent.value_ptr else null;
+    }
+
+    pub fn getEntry(self: *const FileTree, path: []const u8) ?*const CentralDirectoryHeader {
+        return self.entries.get(path);
     }
 };
