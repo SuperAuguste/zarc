@@ -1,312 +1,402 @@
 const std = @import("std");
-const mem = std.mem;
+
+fn readStruct(comptime T: type, instance: *T, parser: *Parser, reader: anytype) !usize {
+    const fields = std.meta.fields(T);
+
+    var buf: [T.size]u8 = undefined;
+    _ = try reader.readAll(&buf);
+
+    comptime var index = 0;
+    inline for (fields) |field| {
+        const child = field.field_type;
+
+        switch (@typeInfo(child)) {
+            .Struct => |data| {
+                if (data.layout == .Packed) {
+                    const Int = std.meta.Int(.unsigned, @sizeOf(child) * 8);
+
+                    @field(instance, field.name) = @bitCast(field.field_type, std.mem.readIntLittle(Int, buf[index..][0..@sizeOf(Int)]));
+                    index += @sizeOf(Int);
+                } else {
+                    const Int = @typeInfo(@TypeOf(child.cast)).Fn.args[0].arg_type.?;
+
+                    @field(instance, field.name) = child.cast(std.mem.readIntLittle(Int, buf[index..][0..@sizeOf(Int)]));
+                    index += @sizeOf(Int);
+                }
+            },
+            .Enum => |data| {
+                @field(instance, field.name) = @intToEnum(child, std.mem.readIntLittle(data.tag_type, buf[index..][0..@sizeOf(data.tag_type)]));
+                index += @sizeOf(data.tag_type);
+            },
+            .Int => {
+                @field(instance, field.name) = std.mem.readIntLittle(child, buf[index..][0..@sizeOf(child)]);
+                index += @sizeOf(child);
+            },
+            else => unreachable,
+        }
+    }
+
+    if (index != T.size) @compileError("invalid size");
+
+    return T.size;
+}
 
 pub const CompressionMethod = enum(u16) {
     none = 0,
-    shrunk = 1,
-    rwcf1 = 2,
-    rwcf2 = 3,
-    rwcf3 = 4,
-    rwcf4 = 5,
-    imploded = 6,
+    shrunk,
+    reduced1,
+    reduced2,
+    reduced3,
+    reduced4,
+    imploded,
     deflated = 8,
-    enhanced_deflated = 9,
-    pkware_dcl_imploded = 10,
+    enhanced_deflated,
+    dcl_imploded,
     bzip2 = 12,
     lzma = 14,
     ibm_terse = 18,
-    ibm_lz77_z = 19,
-    ppmd_version_i_rev_1 = 98,
+    ibm_lz77_z,
+    zstd_deprecated,
+    zstd = 93,
+    ppmd_1_1 = 98,
+};
+
+pub const Version = struct {
+    pub const Vendor = enum(u8) {
+        dos = 0,
+        amiga,
+        openvms,
+        unix,
+        vm,
+        atari,
+        os2_hpfs,
+        macintosh,
+        z_system,
+        cp_m,
+        ntfs,
+        mvs,
+        vse,
+        acorn,
+        vfat,
+        alt_mvs,
+        beos,
+        tandem,
+        os400,
+        osx,
+        _,
+    };
+
+    vendor: Vendor,
+    major: u8,
+    minor: u8,
+
+    pub fn cast(n: u16) Version {
+        return .{
+            .vendor = @intToEnum(Vendor, @truncate(u8, n >> 8)),
+            .major = @truncate(u8, n) / 10,
+            .minor = @truncate(u8, n) % 10,
+        };
+    }
+};
+
+pub const GeneralPurposeBitFlag = packed struct {
+    encrypted: bool,
+    compression1: u1,
+    compression2: u1,
+    data_descriptor: bool,
+    enhanced_deflation: u1,
+    compressed_patched: bool,
+    strong_encryption: bool,
+    __7_reserved: u1,
+    __8_reserved: u1,
+    __9_reserved: u1,
+    __10_reserved: u1,
+    is_utf8: bool,
+    __12_reserved: u1,
+    mask_headers: bool,
+    __14_reserved: u1,
+    __15_reserved: u1,
+};
+
+pub const InternalAttributes = packed struct {
+    apparent_text: bool,
+    __1_reserved: u1,
+    control_before_logical: bool,
+    __3_7_reserved: u5,
+    __8_15_reserved: u8,
+};
+
+pub const ModificationTime = struct {
+    second: u8,
+    minute: u8,
+    hour: u8,
+
+    pub fn cast(n: u16) ModificationTime {
+        return .{
+            .second = @as(u8, @truncate(u5, n)) * 2,
+            .minute = @truncate(u6, n >> 5),
+            .hour = @truncate(u5, n >> 11),
+        };
+    }
+};
+
+pub const ModificationDate = struct {
+    day: u8,
+    month: u8,
+    year: u16,
+
+    pub fn cast(n: u16) ModificationDate {
+        return .{
+            .day = @truncate(u5, n),
+            .month = @truncate(u4, n >> 5),
+            .year = @as(u16, @truncate(u7, n >> 9)) + 1980,
+        };
+    }
 };
 
 pub const LocalFileHeader = struct {
     pub const Signature = 0x04034b50;
+    pub const Data = struct {
+        pub const size = 26;
 
-    parser: *Parser,
-    location: usize,
+        version_needed: Version,
+        bit_flag: GeneralPurposeBitFlag,
+        compression_method: CompressionMethod,
 
-    version_needed: u16,
-    bit_flag: u16,
-    compression_method: CompressionMethod,
+        last_mod_time: ModificationTime,
+        last_mod_date: ModificationDate,
 
-    last_mod_time: u16,
-    last_mod_date: u16,
+        checksum: u32,
+        compressed_size: u32,
+        uncompressed_size: u32,
 
-    checksum: u32,
-    compressed_size: u32,
-    uncompressed_size: u32,
+        filename_len: u16,
+        extrafield_len: u16,
+    };
 
-    filename_len: u16,
-    extrafield_len: u16,
+    data: Data,
 
-    pub fn parse(self: *LocalFileHeader, parser: *Parser) !void {
-        self.parser = parser;
-        self.location = (try parser.file.getPos()) - 4;
+    central_header: *const CentralDirectoryHeader,
 
-        var buf: [26]u8 = undefined;
-        _ = try parser.reader.readAll(&buf);
+    pub fn parse(self: *LocalFileHeader, central_header: *const CentralDirectoryHeader, parser: *Parser, reader: anytype) !void {
+        self.central_header = central_header;
 
-        self.version_needed = mem.readIntLittle(u16, buf[0..2]);
-        self.bit_flag = mem.readIntLittle(u16, buf[2..4]);
-        self.compression_method = @intToEnum(CompressionMethod, mem.readIntLittle(u16, buf[4..6]));
+        const read = try readStruct(Data, &self.data, parser, reader);
+        const seek = self.data.filename_len + self.data.extrafield_len;
 
-        self.last_mod_time = mem.readIntLittle(u16, buf[6..8]);
-        self.last_mod_date = mem.readIntLittle(u16, buf[8..10]);
+        try parser.file.seekBy(seek);
 
-        self.checksum = mem.readIntLittle(u32, buf[10..14]);
-        self.compressed_size = mem.readIntLittle(u32, buf[14..18]);
-        self.uncompressed_size = mem.readIntLittle(u32, buf[18..22]);
-
-        self.filename_len = mem.readIntLittle(u16, buf[22..24]);
-        self.extrafield_len = mem.readIntLittle(u16, buf[24..26]);
-
-        try parser.file.seekBy(self.filename_len + self.extrafield_len);
-
-        if (self.bit_flag & 0x08 == 0x08) {
-            var curr = try self.parser.file.getPos();
-
-            var data_descriptor_sigs = [_]u32{ LocalFileHeader.Signature, CentralDirectoryHeader.Signature, DataDescriptor.Signature };
-            var sig_result = try self.parser.matchSignature(&data_descriptor_sigs, curr, .forwards);
-
-            if (sig_result.signature != DataDescriptor.Signature)
-                try self.parser.reader.context.seekBy(-16);
-
-            var data_descriptor: DataDescriptor = undefined;
-            try DataDescriptor.parse(&data_descriptor, self.parser);
-
-            self.checksum = data_descriptor.checksum;
-            self.compressed_size = data_descriptor.compressed_size;
-            self.uncompressed_size = data_descriptor.uncompressed_size;
-
-            try parser.file.seekTo(curr);
-        }
-    }
-
-    pub fn decompress(self: *const LocalFileHeader, buffer: []u8) !usize {
-        switch (self.compression_method) {
-            .none => {
-                return try self.parser.reader.readAll(buffer[0..self.uncompressed_size]);
-            },
-            .deflated => {
-                var window: [0x8000]u8 = undefined;
-                var stream = std.compress.deflate.inflateStream(self.parser.reader, &window);
-                return try stream.reader().readAll(buffer[0..self.uncompressed_size]);
-            },
-            else => {
-                std.log.crit("bidoof this method isn't implemented! {s}", .{self.compression_method});
-                return error.MethodNotImplemented;
-            },
-        }
+        return read + seek;
     }
 };
 
 pub const DataDescriptor = struct {
     pub const Signature = 0x04034b50;
+    pub const Data = struct {
+        pub const size = 12;
 
-    parser: *Parser,
-    location: usize,
+        checksum: u32,
+        compressed_size: u32,
+        uncompressed_size: u32,
+    };
 
-    checksum: u32,
-    compressed_size: u32,
-    uncompressed_size: u32,
+    data: Data,
 
-    pub fn parse(self: *DataDescriptor, parser: *Parser) !void {
-        self.parser = parser;
-        self.location = (try parser.reader.context.getPos()) - 4;
-
-        var buf: [12]u8 = undefined;
-        _ = try parser.reader.readAll(&buf);
-
-        self.checksum = mem.readIntLittle(u32, buf[0..4]);
-        self.compressed_size = mem.readIntLittle(u32, buf[4..8]);
-        self.uncompressed_size = mem.readIntLittle(u32, buf[8..12]);
+    pub fn parse(self: *DataDescriptor, parser: *Parser, reader: anytype) !usize {
+        return readStruct(Data, &self.data, parser, reader);
     }
 };
 
 pub const CentralDirectoryHeader = struct {
     pub const Signature = 0x02014b50;
+    pub const Data = struct {
+        pub const size = 42;
 
-    parser: *Parser,
-    location: usize,
+        version_made: Version,
+        version_needed: Version,
+        bit_flag: GeneralPurposeBitFlag,
+        compression_method: CompressionMethod,
 
-    version_made: u16,
-    version_needed: u16,
-    bit_flag: u16,
-    compression_method: u16,
+        last_mod_time: ModificationTime,
+        last_mod_date: ModificationDate,
 
-    last_mod_time: u16,
-    last_mod_date: u16,
+        checksum: u32,
+        compressed_size: u32,
+        uncompressed_size: u32,
 
-    checksum: u32,
-    compressed_size: u32,
-    uncompressed_size: u32,
+        filename_len: u16,
+        extrafield_len: u16,
+        file_comment_len: u16,
 
-    filename_len: u16,
-    extrafield_len: u16,
-    file_comment_len: u16,
+        disk_start: u16,
+        internal_attributes: u16,
+        external_attributes: u32,
 
-    disk_start: u16,
-    internal_attributes: u16,
-    external_attributes: u32,
+        data_offset: u32,
+    };
 
-    data_offset: u32,
+    data: Data,
+
+    compressed: u64 = 0,
+    uncompressed: u64 = 0,
+    offset: u64 = 0,
 
     filename: []const u8,
     extrafield: []const u8,
     file_comment: []const u8,
 
-    pub fn parse(self: *CentralDirectoryHeader, parser: *Parser, reader: anytype, position: usize) !usize {
-        self.parser = parser;
-        self.location = position - 4;
+    local_header: ?LocalFileHeader,
 
-        var buf: [42]u8 = undefined;
-        _ = try reader.readAll(&buf);
+    pub fn parse(self: *CentralDirectoryHeader, parser: *Parser, reader: anytype) !usize {
+        const read = try readStruct(Data, &self.data, parser, reader);
+        const seek = self.data.filename_len + self.data.extrafield_len + self.data.file_comment_len;
 
-        self.version_made = mem.readIntLittle(u16, buf[0..2]);
-        self.version_needed = mem.readIntLittle(u16, buf[2..4]);
-        self.bit_flag = mem.readIntLittle(u16, buf[4..6]);
-        self.compression_method = mem.readIntLittle(u16, buf[6..8]);
+        self.filename = try parser.readString(reader, self.data.filename_len);
 
-        self.last_mod_time = mem.readIntLittle(u16, buf[8..10]);
-        self.last_mod_date = mem.readIntLittle(u16, buf[10..12]);
+        if (self.data.disk_start != 0 and self.data.disk_start != 1) return error.MultidiskUnsupported;
 
-        self.checksum = mem.readIntLittle(u32, buf[12..16]);
-        self.compressed_size = mem.readIntLittle(u32, buf[16..20]);
-        self.uncompressed_size = mem.readIntLittle(u32, buf[20..24]);
+        self.compressed = self.data.compressed_size;
+        self.uncompressed = self.data.uncompressed_size;
+        self.offset = self.data.data_offset;
 
-        self.filename_len = mem.readIntLittle(u16, buf[24..26]);
-        self.extrafield_len = mem.readIntLittle(u16, buf[26..28]);
-        self.file_comment_len = mem.readIntLittle(u16, buf[28..30]);
+        var pos: usize = 0;
+        while (pos < self.data.extrafield_len) {
+            const tag = try reader.readIntLittle(u16);
+            const size = try reader.readIntLittle(u16);
 
-        self.disk_start = mem.readIntLittle(u16, buf[30..32]);
-        self.internal_attributes = mem.readIntLittle(u16, buf[32..34]);
-        self.external_attributes = mem.readIntLittle(u32, buf[34..38]);
+            if (tag == 0x0001) {
+                if (size > 28) return error.InvalidZip;
+                var field_read: u16 = 0;
 
-        self.data_offset = mem.readIntLittle(u32, buf[38..42]);
+                if (self.uncompressed == 0xFFFFFFFF) {
+                    if (field_read + 8 > size) return error.InvalidZip;
 
-        self.filename = try parser.readString(reader, self.filename_len);
-        self.extrafield = try parser.readString(reader, self.extrafield_len);
-        self.file_comment = try parser.readString(reader, self.file_comment_len);
+                    self.uncompressed = try reader.readIntLittle(u64);
+                    field_read += 8;
+                }
 
-        return 42 + self.filename_len + self.extrafield_len + self.file_comment_len;
+                if (self.compressed == 0xFFFFFFFF) {
+                    if (field_read + 8 > size) return error.InvalidZip;
+
+                    self.compressed = try reader.readIntLittle(u64);
+                    field_read += 8;
+                }
+
+                if (self.offset == 0xFFFFFFFF) {
+                    if (field_read + 8 > size) return error.InvalidZip;
+
+                    self.offset = try reader.readIntLittle(u64);
+                    field_read += 8;
+                }
+
+                if (size - field_read > 0) {
+                    try reader.skipBytes(size - field_read, .{});
+                }
+            } else {
+                try reader.skipBytes(size, .{});
+            }
+
+            pos += 4 + size;
+        }
+
+        // self.extrafield = try parser.readString(reader, self.data.extrafield_len);
+        self.file_comment = try parser.readString(reader, self.data.file_comment_len);
+
+        return read + seek;
     }
 
-    pub fn readLocalFileHeader(self: *const CentralDirectoryHeader) !LocalFileHeader {
+    pub fn readLocalFileHeader(self: *const CentralDirectoryHeader) !*const LocalFileHeader {
+        if (self.local_header) return &self.local_header;
+
         try self.parser.file.seekTo(self.parser.start_offset + self.data_offset + 4);
 
-        var lfh: LocalFileHeader = undefined;
-        try LocalFileHeader.parse(&lfh, self.parser);
+        self.local_header = undefined;
+        self.local_header.?.parse(self, self.parser, self.reader);
 
-        return lfh;
+        return &self.local_header;
     }
 };
 
 pub const EndCentralDirectory64Record = struct {
     pub const Signature = 0x06064b50;
+    pub const Data = struct {
+        pub const size = 52;
 
-    parser: *Parser,
-    location: usize,
+        size: u64,
 
-    size: u64,
+        version_made: u16,
+        version_needed: u16,
 
-    version_made: u16,
-    version_needed: u16,
+        disk_number: u32,
+        disk_start_central_directory: u32,
+        disk_count_directory_entries: u64,
 
-    disk_number: u32,
-    disk_start_central_directory: u32,
-    disk_count_directory_entries: u64,
+        central_directory_entry_count: u64,
+        central_directory_size: u64,
+        central_directory_offset: u64,
+    };
 
-    central_directory_entry_count: u64,
-    central_directory_size: u64,
-    central_directory_offset: u64,
+    data: Data,
 
-    pub fn parse(self: *EndCentralDirectory64Record, parser: *Parser) !usize {
-        self.parser = parser;
-        self.location = (try parser.file.getPos()) - 4;
+    extensible_data_sector: []const u8,
 
-        var buf: [52]u8 = undefined;
-        _ = try parser.reader.readAll(&buf);
+    pub fn parse(self: *EndCentralDirectory64Record, parser: *Parser, reader: anytype) !usize {
+        const read = try readStruct(Data, &self.data, parser, reader);
+        const seek = self.data.size - 44;
 
-        self.size = mem.readIntLittle(u64, buf[0..8]);
+        self.extensible_data_sector = try parser.readString(reader, seek);
 
-        self.version_made = mem.readIntLittle(u16, buf[8..10]);
-        self.disk_count_directory_entries = mem.readIntLittle(u16, buf[10..12]);
-
-        self.disk_number = mem.readIntLittle(u32, buf[12..16]);
-        self.disk_start_central_directory = mem.readIntLittle(u32, buf[16..20]);
-        self.disk_count_directory_entries = mem.readIntLittle(u64, buf[20..28]);
-
-        self.central_directory_entry_count = mem.readIntLittle(u64, buf[28..36]);
-        self.central_directory_size = mem.readIntLittle(u64, buf[36..44]);
-        self.central_directory_offset = mem.readIntLittle(u64, buf[44..52]);
-
-        try parser.file.seekBy(self.size - 44);
-
-        return 12 + self.size;
+        return read + seek;
     }
 };
 
 pub const EndCentralDirectory64Locator = struct {
     pub const Signature = 0x07064b50;
+    pub const Data = struct {
+        pub const size = 16;
 
-    parser: *Parser,
-    location: usize,
+        disk_number: u32,
+        ecd64_offset: u64,
+        number_of_disks: u32,
+    };
 
-    disk_number: u32,
-    ecd64_offset: u64,
-    number_of_disks: u32,
+    data: Data,
 
-    pub fn parse(self: *EndCentralDirectory64Locator, parser: *Parser) !usize {
-        self.parser = parser;
-        self.location = (try parser.file.getPos()) - 4;
-
-        var buf: [16]u8 = undefined;
-        _ = try parser.reader.readAll(&buf);
-
-        self.disk_number = mem.readIntLittle(u32, buf[0..4]);
-        self.ecd64_offset = mem.readIntLittle(u64, buf[4..12]);
-        self.number_of_disks = mem.readIntLittle(u32, buf[12..16]);
-
-        return 16;
+    pub fn parse(self: *EndCentralDirectory64Locator, parser: *Parser, reader: anytype) !usize {
+        return try readStruct(Data, &self.data, parser, reader);
     }
 };
 
 pub const EndCentralDirectoryRecord = struct {
     pub const Signature = 0x06054b50;
+    pub const Data = struct {
+        pub const size = 18;
+
+        disk_number: u16,
+        disk_start_central_directory: u16,
+        disk_count_directory_entries: u16,
+
+        central_directory_entry_count: u16,
+        central_directory_size: u32,
+        central_directory_offset: u32,
+
+        comment_length: u16,
+    };
 
     parser: *Parser,
     location: usize,
 
-    disk_number: u16,
-    disk_start_central_directory: u16,
-    disk_count_directory_entries: u16,
+    data: Data,
 
-    central_directory_entry_count: u16,
-    central_directory_size: u32,
-    central_directory_offset: u32,
+    comment: []const u8,
 
-    comment_length: u16,
+    pub fn parse(self: *EndCentralDirectoryRecord, parser: *Parser, reader: anytype) !usize {
+        const read = try readStruct(Data, &self.data, parser, reader);
+        const seek = self.data.comment_length;
 
-    pub fn parse(self: *EndCentralDirectoryRecord, parser: *Parser) !usize {
-        self.parser = parser;
-        self.location = (try parser.file.getPos()) - 4;
+        self.comment = try parser.readString(reader, self.data.comment_length);
 
-        var buf: [18]u8 = undefined;
-        _ = try parser.reader.readAll(&buf);
-
-        self.disk_number = mem.readIntLittle(u16, buf[0..2]);
-        self.disk_start_central_directory = mem.readIntLittle(u16, buf[2..4]);
-        self.disk_count_directory_entries = mem.readIntLittle(u16, buf[4..6]);
-
-        self.central_directory_entry_count = mem.readIntLittle(u16, buf[6..8]);
-        self.central_directory_size = mem.readIntLittle(u32, buf[8..12]);
-        self.central_directory_offset = mem.readIntLittle(u32, buf[12..16]);
-
-        self.comment_length = mem.readIntLittle(u16, buf[16..18]);
-
-        try parser.file.seekBy(self.comment_length);
-
-        return 18 + self.comment_length;
+        return read + self.data.comment_length;
     }
 };
 
@@ -329,6 +419,10 @@ pub const Parser = struct {
 
     file_tree: FileTree = FileTree{},
 
+    num_entries: u32 = 0,
+    dir_size: u64 = 0,
+    dir_offset: u64 = 0,
+
     pub fn init(allocator: *std.mem.Allocator, file: std.fs.File) Parser {
         return .{
             .allocator = allocator,
@@ -342,28 +436,82 @@ pub const Parser = struct {
         self.central_directory.deinit(self.allocator);
         self.file_headers.deinit(self.allocator);
         self.string_buffer.deinit(self.allocator);
-        self.file_tree.root_dir.deinit(self.allocator);
+
+        self.file_tree.deinit(self.allocator);
     }
 
     pub fn load(self: *Parser) !void {
-        self.loadZip64() catch |err| {
-            if (err == error.InvalidZip64) {
-                try self.loadZip();
-            } else return err;
-        };
+        const end = try self.file.getEndPos();
+        const start_offset: u64 = EndCentralDirectoryRecord.Data.size + 4;
+        var offset = start_offset;
 
-        const string_space = if (self.is_zip64)
-            self.zip64_ecdr.central_directory_size - (46 * self.zip64_ecdr.central_directory_entry_count)
-        else
-            self.zip_ecdr.central_directory_size - (46 * @as(u32, self.zip_ecdr.central_directory_entry_count));
+        while (offset < end and offset < 0xffff + start_offset) : (offset += 1) {
+            try self.file.seekTo(end - offset);
 
-        try self.string_buffer.ensureTotalCapacity(self.allocator, string_space);
+            if ((try self.reader.readIntLittle(u32)) == EndCentralDirectoryRecord.Signature) break;
+        }
+
+        _ = try self.zip_ecdr.parse(self, self.reader);
+
+        const pos = end - offset;
+
+        if (pos > EndCentralDirectory64Locator.Data.size + EndCentralDirectory64Record.Data.size + 8) {
+            const locator = pos - EndCentralDirectory64Locator.Data.size - 4;
+            try self.file.seekTo(locator);
+
+            const zip64_ecdl_sig = try self.reader.readIntLittle(u32);
+            if (zip64_ecdl_sig == EndCentralDirectory64Locator.Signature) {
+                _ = try self.zip64_ecdl.parse(self, self.reader);
+
+                if (self.zip64_ecdl.data.ecd64_offset > end - EndCentralDirectory64Record.Data.size - 4) return error.InvalidZip;
+
+                try self.file.seekTo(self.zip64_ecdl.data.ecd64_offset);
+
+                const zip64_ecdr_sig = try self.reader.readIntLittle(u32);
+                if (zip64_ecdr_sig == EndCentralDirectory64Record.Signature) {
+                    _ = try self.zip64_ecdr.parse(self, self.reader);
+
+                    self.is_zip64 = true;
+                }
+            }
+        }
+
+        self.num_entries = self.zip_ecdr.data.central_directory_entry_count;
+        self.dir_size = self.zip_ecdr.data.central_directory_size;
+        self.dir_offset = self.zip_ecdr.data.central_directory_offset;
+
+        // Sanity checks
+        if (self.is_zip64) {
+            if (self.zip64_ecdr.data.disk_number != 0 and self.zip64_ecdr.data.disk_number != 1) return error.MultidiskUnsupported;
+            if (self.zip64_ecdr.data.disk_start_central_directory != 0 and self.zip64_ecdr.data.disk_start_central_directory != 1) return error.MultidiskUnsupported;
+            if (self.zip64_ecdr.data.disk_count_directory_entries != self.zip_ecdr.data.central_directory_entry_count) return error.MultidiskUnsupported;
+
+            if (self.zip64_ecdr.data.central_directory_entry_count > std.math.maxInt(u32)) return error.TooManyFiles;
+            self.num_entries = @truncate(u32, self.zip64_ecdr.data.central_directory_entry_count);
+
+            self.dir_size = self.zip64_ecdr.data.central_directory_size;
+            self.dir_offset = self.zip64_ecdr.data.central_directory_offset;
+        } else {
+            if (self.zip_ecdr.data.disk_number != 0 and self.zip_ecdr.data.disk_number != 1) return error.MultidiskUnsupported;
+            if (self.zip_ecdr.data.disk_start_central_directory != 0 and self.zip_ecdr.data.disk_start_central_directory != 1) return error.MultidiskUnsupported;
+            if (self.zip_ecdr.data.disk_count_directory_entries != self.zip_ecdr.data.central_directory_entry_count) return error.MultidiskUnsupported;
+        }
+
+        // Gets the start of the actual ZIP.
+        // This is required because ZIPs can have preambles for self-execution, for example
+        // so they could actually start anywhere in the file.
+        self.start_offset = pos - self.zip_ecdr.data.central_directory_size - self.zip_ecdr.data.central_directory_offset;
+
+        const string_space = self.dir_size - ((CentralDirectoryHeader.Data.size + 4) * self.num_entries);
+        try self.string_buffer.ensureUnusedCapacity(self.allocator, string_space);
 
         try self.readCentralDirectory();
     }
 
     fn readString(self: *Parser, reader: anytype, len: usize) ![]const u8 {
-        std.debug.assert(self.string_buffer.items.len + len <= self.string_buffer.capacity);
+        if (len == 0) return "";
+
+        try self.string_buffer.ensureUnusedCapacity(self.allocator, len);
         const prev_len = self.string_buffer.items.len;
         self.string_buffer.items.len += len;
 
@@ -373,100 +521,34 @@ pub const Parser = struct {
         return buf;
     }
 
-    const SignatureDirection = enum { forwards, backwards };
-    const SignatureResult = struct { offset: u64, signature: u32 };
-
-    /// NOTE: This is a great utility method, but it's also pretty slow
-    /// for signatures > 1 because `for (signatures)` is not inlinable (LLVM crashes if you try to inline it).
-    /// Sadly, this is the only way to properly find signatures, so it's *slight* a tradeoff we've gotta absorb. :(
-    fn matchSignature(self: *Parser, signatures: []u32, start_offset: u64, direction: SignatureDirection) !SignatureResult {
-        const end = if (direction == .backwards) try self.file.getEndPos() else start_offset;
-        var offset = if (direction == .backwards) start_offset else 0;
-
-        if (end < offset) return error.InvalidFormat;
-
-        while (((direction == .backwards and offset < end) or (direction == .forwards)) and offset < 1024) : (offset += 1) {
-            for (signatures) |sig| {
-                if ((try self.reader.readIntLittle(u32)) != sig) {
-                    try self.file.seekTo(if (direction == .backwards) end - offset else end + offset);
-                } else {
-                    return SignatureResult{ .offset = if (direction == .backwards) end - offset else end + offset, .signature = sig };
-                }
-            }
-        }
-
-        return error.InvalidZip;
-    }
-
-    fn findSignature(self: *Parser, sig: u32, start_offset: u64, direction: SignatureDirection) !u64 {
-        return (try self.matchSignature(&[_]u32{sig}, start_offset, direction)).offset;
-    }
-
-    fn loadZip(self: *Parser) !void {
-        _ = self.findSignature(EndCentralDirectoryRecord.Signature, 22, .backwards) catch return error.InvalidZip;
-
-        _ = try self.zip_ecdr.parse(self);
-    }
-
-    fn loadZip64(self: *Parser) !void {
-        _ = self.findSignature(EndCentralDirectory64Locator.Signature, 22, .backwards) catch return error.InvalidZip64;
-
-        _ = try self.zip64_ecdl.parse(self);
-
-        try self.file.seekTo(self.zip64_ecdl.location - self.zip64_ecdl.ecd64_offset);
-
-        const zip64_ecdr_sig = try self.reader.readIntLittle(u32);
-        if (zip64_ecdr_sig != EndCentralDirectory64Record.Signature) return error.InvalidZip64;
-
-        _ = try self.zip64_ecdl.parse(self);
-
-        self.is_zip64 = true;
-    }
-
-    fn findStart(self: *Parser) !void {
-        var original_position = try self.file.getPos();
-        try self.file.seekTo(0);
-
-        var start_sigs = [_]u32{ LocalFileHeader.Signature, CentralDirectoryHeader.Signature, EndCentralDirectoryRecord.Signature };
-        _ = try self.matchSignature(&start_sigs, 0, .forwards);
-
-        self.start_offset = (try self.file.getPos()) - 4;
-        try self.file.seekTo(original_position);
+    fn centralHeaderLessThan(_: void, lhs: CentralDirectoryHeader, rhs: CentralDirectoryHeader) bool {
+        return lhs.data.data_offset < rhs.data.data_offset;
     }
 
     fn readCentralDirectory(self: *Parser) !void {
-        // Gets the start of the actual ZIP.
-        // This is required because ZIPs can have preambles for self-execution, for example
-        // so they could actually start anywhere in a `.zip` file.
-        try self.findStart();
+        try self.central_directory.ensureTotalCapacity(self.allocator, self.num_entries);
 
-        // Actually begin parsing the central directory
-        if (self.is_zip64) {
-            std.debug.panic("zip64 unimplemented\n", .{});
-        } else {
-            const size = self.zip_ecdr.central_directory_entry_count;
-            try self.central_directory.ensureTotalCapacity(self.allocator, size);
+        var index: u32 = 0;
+        var pos: usize = self.start_offset + self.dir_offset;
+        try self.file.seekTo(pos);
 
-            var index: u32 = 0;
-            var pos: usize = self.start_offset + self.zip_ecdr.central_directory_offset;
-            try self.file.seekTo(pos);
+        var buffered = std.io.BufferedReader(8192, std.fs.File.Reader){ .unbuffered_reader = self.reader };
+        const reader = buffered.reader();
 
-            var buffered = std.io.BufferedReader(8192, std.fs.File.Reader){ .unbuffered_reader = self.reader };
-            const reader = buffered.reader();
+        try self.file_tree.entries.ensureCapacity(self.allocator, self.num_entries);
 
-            try self.file_tree.entries.ensureCapacity(self.allocator, size);
+        while (index < self.num_entries) : (index += 1) {
+            const sig = try reader.readIntLittle(u32);
+            if (sig != CentralDirectoryHeader.Signature) return error.InvalidZip;
+            pos += 4;
 
-            while (index < size) : (index += 1) {
-                const sig = try reader.readIntLittle(u32);
-                if (sig != CentralDirectoryHeader.Signature) return error.InvalidZip;
-                pos += 4;
+            var hdr = self.central_directory.addOneAssumeCapacity();
+            pos += try hdr.parse(self, reader);
 
-                var hdr = self.central_directory.addOneAssumeCapacity();
-                pos += try hdr.parse(self, reader, pos);
-
-                try self.file_tree.appendFile(self.allocator, hdr);
-            }
+            try self.file_tree.appendFile(self.allocator, hdr);
         }
+
+        std.sort.sort(CentralDirectoryHeader, self.central_directory.items, {}, centralHeaderLessThan);
     }
 };
 
@@ -492,11 +574,26 @@ pub const FileTree = struct {
         try self.entries.put(allocator, hdr.filename, hdr);
     }
 
-    pub fn readDir(self: *const FileTree, path: []const u8) ?*std.ArrayListUnmanaged(*const CentralDirectoryHeader) {
+    pub fn deinit(self: *FileTree, allocator: *std.mem.Allocator) void {
+        self.entries.deinit(allocator);
+
+        var it = self.structure.valueIterator();
+        while (it.next()) |entry| {
+            entry.deinit(allocator);
+        }
+
+        self.structure.deinit(allocator);
+    }
+
+    pub fn readDir(self: FileTree, path: []const u8) ?*std.ArrayListUnmanaged(*const CentralDirectoryHeader) {
         return if (self.structure.getEntry(path)) |ent| ent.value_ptr else null;
     }
 
-    pub fn getEntry(self: *const FileTree, path: []const u8) ?*const CentralDirectoryHeader {
+    pub fn getEntry(self: FileTree, path: []const u8) ?*const CentralDirectoryHeader {
         return self.entries.get(path);
     }
 };
+
+comptime {
+    std.testing.refAllDecls(@This());
+}
