@@ -2,6 +2,7 @@
 //! This does NOT implement the `Pre-POSIX.1-1988 (i.e. v7)` tar specification as nobody uses it anymore.
 
 const std = @import("std");
+const simd = @import("../utils/simd.zig");
 
 const FileTypeFlag = extern enum(u8) {
     regular = '0',
@@ -40,7 +41,7 @@ pub const TarEntry = struct {
 
         /// Get the value of a numeric field.
         pub fn getNumeric(self: *Data, comptime T: type, comptime field: []const u8) !T {
-            return try std.fmt.parseInt(T, &@field(self, field), 8);
+            return simd.parseOctal(T, @field(self, field).len, &@field(self, field));
         }
 
         pub fn getSize(self: *Data) !u64 {
@@ -82,18 +83,52 @@ pub const TarEntry = struct {
         }
     };
 
-    data: Data,
+    filename: [255]u8,
+    mode: [7:0]u8,
+    uid: [7:0]u8,
+    gid: [7:0]u8,
     size: u64,
+    mtime: [11:0]u8,
+    checksum: [8]u8,
+    type_flag: FileTypeFlag,
+    link_name: [100]u8,
+    magic: [5:0]u8,
+    version: [2]u8,
+    uname: [31:0]u8,
+    gname: [31:0]u8,
+    devmajor: [7:0]u8,
+    devminor: [7:0]u8,
+    prefix: [155]u8,
+    pad: [12]u8,
 
-    pub fn parse(self: *TarEntry, parser: *Parser) !bool {
-        self.data = try parser.reader.readStruct(Data);
+    data_offset: u64,
 
-        if (@enumToInt(self.data.type_flag) == 0) return false;
+    pub fn parse(self: *TarEntry, parser: *Parser, offset: *u64) !void {
+        var data = try parser.reader.readStruct(Data);
+        self.data_offset = offset.* + 512;
 
-        self.size = try self.data.getSize();
-        try parser.file.seekBy(@intCast(i64, self.size));
+        self.size = try data.getSize();
 
-        return true;
+        offset.* += @intCast(u64, self.size) + 512;
+        try parser.file.seekTo(offset.*);
+    }
+};
+
+const PreloadPass = struct {
+    parser: *Parser,
+    entry_count: usize = 0,
+
+    fn preload(self: *PreloadPass) !void {
+        while (true) {
+            var data = try self.parser.reader.readStruct(TarEntry.Data);
+
+            if (@enumToInt(data.type_flag) == 0) return;
+
+            var size = try data.getSize();
+            try self.parser.file.seekBy(@intCast(i64, size));
+
+            self.entry_count += 1;
+        }
     }
 };
 
@@ -102,6 +137,8 @@ pub const Parser = struct {
 
     file: std.fs.File,
     reader: std.fs.File.Reader,
+
+    entries: std.ArrayListUnmanaged(TarEntry) = .{},
 
     pub fn init(allocator: *std.mem.Allocator, file: std.fs.File) Parser {
         return .{
@@ -112,12 +149,28 @@ pub const Parser = struct {
         };
     }
 
+    /// Loads a tar file.
+    /// The best solution for loading with our file-tree system in mind seems to be a two-pass one:
+    /// - On the first (PreloadPass) pass, count the number of entries and total length of filenames so we can pre-allocate them
+    /// - On the second (LoadPass) pass, we can actually store things in our entries ArrayList
     pub fn load(self: *Parser) !void {
-        var s: TarEntry = undefined;
+        var preload_pass = PreloadPass{ .parser = self };
+        try preload_pass.preload();
 
-        while (try s.parse(self)) {
-            var name: [255]u8 = undefined;
-            s.data.getFilename(&name);
+        try self.entries.ensureTotalCapacity(self.allocator, preload_pass.entry_count);
+
+        try self.file.seekTo(0);
+
+        var offset: u64 = 0;
+        var index: usize = 0;
+
+        while (index < preload_pass.entry_count) : (index += 1) {
+            var entry = self.entries.addOneAssumeCapacity();
+            try entry.parse(self, &offset);
         }
+    }
+
+    pub fn deinit(self: *Parser) void {
+        self.entries.deinit(self.allocator);
     }
 };
