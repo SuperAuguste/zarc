@@ -30,5 +30,9 @@ pub fn main() !void {
         try writer.print("Runtime: {d:.3}ms\n", .{@intToFloat(f64, time) / 1e6});
 
         try writer.writeAll("\n-----\n\n");
+
+        _ = size;
+
+        // while (true) {}
     }
 }

@@ -4,7 +4,7 @@
 const std = @import("std");
 const simd = @import("../utils/simd.zig");
 
-const FileTypeFlag = extern enum(u8) {
+const FileTypeFlag = enum(u8) {
     regular = '0',
     hard_link = '1',
     symbolic_link = '2',
@@ -44,10 +44,10 @@ pub const TarEntry = struct {
             return simd.parseOctal(T, @field(self, field).len, &@field(self, field));
         }
 
-        pub fn getSize(self: *Data) !u64 {
+        pub fn getSize(self: *Data) !u33 {
             var size = try self.getNumeric(u64, "size");
 
-            return ((size + 511) / 512) * 512;
+            return @intCast(u33, ((size + 511) / 512) * 512);
         }
 
         pub fn getFilename(self: *Data, buf: []u8) void {
@@ -84,30 +84,67 @@ pub const TarEntry = struct {
     };
 
     filename: [255]u8,
-    mode: [7:0]u8,
-    uid: [7:0]u8,
-    gid: [7:0]u8,
-    size: u64,
-    mtime: [11:0]u8,
+
+    mode: u21,
+    uid: u21,
+    gid: u21,
+    size: u33,
+    last_modified: u33,
+
     checksum: [8]u8,
     type_flag: FileTypeFlag,
-    link_name: [100]u8,
-    magic: [5:0]u8,
-    version: [2]u8,
-    uname: [31:0]u8,
-    gname: [31:0]u8,
-    devmajor: [7:0]u8,
-    devminor: [7:0]u8,
-    prefix: [155]u8,
-    pad: [12]u8,
+    version: [2]u8, // "00"
+
+    owner_user_name: [31]u8,
+    owner_group_name: [31]u8,
+    devmajor: u21,
+    devminor: u21,
 
     data_offset: u64,
+
+    // This SIMD hack saves ~7ms on ~10,000 file tars on my machine
+    const Processor = simd.OctalGroupParser(usize, struct {
+        mode: [7]u8,
+        uid: [7]u8,
+        gid: [7]u8,
+        size: [11]u8,
+        last_modified: [11]u8,
+    });
 
     pub fn parse(self: *TarEntry, parser: *Parser, offset: *u64) !void {
         var data = try parser.reader.readStruct(Data);
         self.data_offset = offset.* + 512;
 
-        self.size = try data.getSize();
+        data.getFilename(&self.filename);
+
+        var out = Processor.process(.{
+            .mode = data.mode,
+            .uid = data.uid,
+            .gid = data.gid,
+            .size = data.size,
+            .last_modified = data.mtime,
+        });
+
+        self.mode = @intCast(u21, out.mode);
+        self.uid = @intCast(u21, out.uid);
+        self.gid = @intCast(u21, out.gid);
+        self.size = @intCast(u33, ((out.size + 511) / 512) * 512);
+        self.last_modified = @intCast(u33, out.last_modified);
+
+        // self.mode = @intCast(u21, try data.getNumeric(usize, "mode"));
+        // self.uid = @intCast(u21, try data.getNumeric(usize, "uid"));
+        // self.gid = @intCast(u21, try data.getNumeric(usize, "gid"));
+        // self.size = try data.getSize();
+        // self.last_modified = @intCast(u33, try data.getNumeric(usize, "mtime"));
+
+        self.checksum = data.checksum;
+        self.type_flag = data.type_flag;
+        self.version = data.version;
+
+        self.owner_user_name = data.uname;
+        self.owner_group_name = data.gname;
+        self.devmajor = if (data.devmajor[0] == 0) 0 else @intCast(u21, try data.getNumeric(usize, "devmajor"));
+        self.devminor = if (data.devminor[0] == 0) 0 else @intCast(u21, try data.getNumeric(usize, "devminor"));
 
         offset.* += @intCast(u64, self.size) + 512;
         try parser.file.seekTo(offset.*);

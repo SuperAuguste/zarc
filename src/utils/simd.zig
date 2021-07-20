@@ -103,14 +103,13 @@ pub fn OctalGroupParser(comptime T: type, comptime Z: type) type {
             const sub_mask = @splat(vector_size, @intCast(T, 48));
 
             comptime for (z_fields) |field| {
-                comptime fillMultiMask(T, vector_size, &multi_mask, multi_offset, @sizeOf(field.field_type));
+                fillMultiMask(T, vector_size, &multi_mask, multi_offset, @sizeOf(field.field_type));
                 multi_offset += @sizeOf(field.field_type);
             };
 
-            comptime var bb_off: usize = 0;
             var big_boy_buf: [vector_size]T = undefined;
-
-            for (@bitCast([vector_size]u8, input)) |b, i| big_boy_buf[i] = b;
+            var bc = @bitCast([vector_size]u8, input);
+            for (bc) |b, i| big_boy_buf[i] = b;
 
             // Let's actually do the math now!
             var vec: VectorT = big_boy_buf;
