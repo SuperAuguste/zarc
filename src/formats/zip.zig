@@ -1,45 +1,6 @@
 const std = @import("std");
 
-fn readStruct(comptime T: type, instance: *T, parser: *Parser, reader: anytype) !usize {
-    const fields = std.meta.fields(T);
-
-    var buf: [T.size]u8 = undefined;
-    _ = try reader.readAll(&buf);
-
-    comptime var index = 0;
-    inline for (fields) |field| {
-        const child = field.field_type;
-
-        switch (@typeInfo(child)) {
-            .Struct => |data| {
-                if (data.layout == .Packed) {
-                    const Int = std.meta.Int(.unsigned, @sizeOf(child) * 8);
-
-                    @field(instance, field.name) = @bitCast(field.field_type, std.mem.readIntLittle(Int, buf[index..][0..@sizeOf(Int)]));
-                    index += @sizeOf(Int);
-                } else {
-                    const Int = @typeInfo(@TypeOf(child.cast)).Fn.args[0].arg_type.?;
-
-                    @field(instance, field.name) = child.cast(std.mem.readIntLittle(Int, buf[index..][0..@sizeOf(Int)]));
-                    index += @sizeOf(Int);
-                }
-            },
-            .Enum => |data| {
-                @field(instance, field.name) = @intToEnum(child, std.mem.readIntLittle(data.tag_type, buf[index..][0..@sizeOf(data.tag_type)]));
-                index += @sizeOf(data.tag_type);
-            },
-            .Int => {
-                @field(instance, field.name) = std.mem.readIntLittle(child, buf[index..][0..@sizeOf(child)]);
-                index += @sizeOf(child);
-            },
-            else => unreachable,
-        }
-    }
-
-    if (index != T.size) @compileError("invalid size");
-
-    return T.size;
-}
+const utils = @import("../utils.zig");
 
 pub const CompressionMethod = enum(u16) {
     none = 0,
@@ -181,7 +142,7 @@ pub const LocalFileHeader = struct {
     pub fn parse(self: *LocalFileHeader, central_header: *const CentralDirectoryHeader, parser: *Parser, reader: anytype) !void {
         self.central_header = central_header;
 
-        const read = try readStruct(Data, &self.data, parser, reader);
+        const read = try utils.readStruct(Data, &self.data, reader, Data.size);
         const seek = self.data.filename_len + self.data.extrafield_len;
 
         try parser.file.seekBy(seek);
@@ -203,7 +164,8 @@ pub const DataDescriptor = struct {
     data: Data,
 
     pub fn parse(self: *DataDescriptor, parser: *Parser, reader: anytype) !usize {
-        return readStruct(Data, &self.data, parser, reader);
+        _ = parser;
+        return utils.readStruct(Data, &self.data, reader, Data.size);
     }
 };
 
@@ -248,7 +210,7 @@ pub const CentralDirectoryHeader = struct {
     local_header: ?LocalFileHeader,
 
     pub fn parse(self: *CentralDirectoryHeader, parser: *Parser, reader: anytype) !usize {
-        const read = try readStruct(Data, &self.data, parser, reader);
+        const read = try utils.readStruct(Data, &self.data, reader, Data.size);
         const seek = self.data.filename_len + self.data.extrafield_len + self.data.file_comment_len;
 
         self.filename = try parser.readString(reader, self.data.filename_len);
@@ -341,7 +303,7 @@ pub const EndCentralDirectory64Record = struct {
     extensible_data_sector: []const u8,
 
     pub fn parse(self: *EndCentralDirectory64Record, parser: *Parser, reader: anytype) !usize {
-        const read = try readStruct(Data, &self.data, parser, reader);
+        const read = try utils.readStruct(Data, &self.data, reader, Data.size);
         const seek = self.data.size - 44;
 
         self.extensible_data_sector = try parser.readString(reader, seek);
@@ -363,7 +325,8 @@ pub const EndCentralDirectory64Locator = struct {
     data: Data,
 
     pub fn parse(self: *EndCentralDirectory64Locator, parser: *Parser, reader: anytype) !usize {
-        return try readStruct(Data, &self.data, parser, reader);
+        _ = parser;
+        return try utils.readStruct(Data, &self.data, reader, Data.size);
     }
 };
 
@@ -391,12 +354,12 @@ pub const EndCentralDirectoryRecord = struct {
     comment: []const u8,
 
     pub fn parse(self: *EndCentralDirectoryRecord, parser: *Parser, reader: anytype) !usize {
-        const read = try readStruct(Data, &self.data, parser, reader);
+        const read = try utils.readStruct(Data, &self.data, reader, Data.size);
         const seek = self.data.comment_length;
 
         self.comment = try parser.readString(reader, self.data.comment_length);
 
-        return read + self.data.comment_length;
+        return read + seek;
     }
 };
 
@@ -544,11 +507,13 @@ pub const Parser = struct {
 
             var hdr = self.central_directory.addOneAssumeCapacity();
             pos += try hdr.parse(self, reader);
-
-            try self.file_tree.appendFile(self.allocator, hdr);
         }
 
         std.sort.sort(CentralDirectoryHeader, self.central_directory.items, {}, centralHeaderLessThan);
+
+        for (self.central_directory.items) |*hdr| {
+            try self.file_tree.appendFile(self.allocator, hdr);
+        }
     }
 };
 

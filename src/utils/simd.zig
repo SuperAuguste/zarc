@@ -6,7 +6,7 @@ const std = @import("std");
 /// Feel free to tinker! Also this could easily be genericized by adding a base
 /// param, but we only need this for octal, so that isn't necessary yet.
 /// Benchmarks on my machine indicate this is twice as fast as std.fmt.parseInt.
-pub fn parseOctal(comptime T: type, comptime size: usize, buf: []const u8) T {
+pub fn parseOctal(comptime T: type, comptime size: usize, buf: [size]u8) T {
     std.debug.assert(buf.len == size);
 
     const VectorT = std.meta.Vector(size, T);
