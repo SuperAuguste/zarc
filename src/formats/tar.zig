@@ -340,9 +340,51 @@ pub const Parser = struct {
         return buf;
     }
 
+    pub fn getFileIndex(self: Parser, filename: []const u8) !usize {
+        for (self.directory.items) |*hdr, i| {
+            if (std.mem.eql(u8, hdr.filename, filename)) {
+                return i;
+            }
+        }
+
+        return error.FileNotFound;
+    }
+
+    pub fn readFileAlloc(self: Parser, allocator: std.mem.Allocator, index: usize) ![]const u8 {
+        const header = self.directory[index];
+
+        try self.seekTo(self.start_offset + header.local_header.offset);
+
+        var buffer = try allocator.alloc(header.uncompressed_size);
+        errdefer allocator.free(buffer);
+
+        var read_buffered = std.io.BufferedReader(8192, std.fs.File.Reader){ .unbuffered_reader = self.reader };
+        var limited_reader = utils.LimitedReader(std.io.BufferedReader(8192, std.fs.File.Reader).Reader).init(read_buffered.reader(), header.compressed_size);
+        const reader = limited_reader.reader();
+
+        var write_stream = std.io.fixedBufferStream(buffer);
+        const writer = write_stream.writer();
+
+        var fifo = std.fifo.LinearFifo(u8, .{ .Static = 8192 }).init();
+
+        switch (header.compression) {
+            .none => {
+                try fifo.pump(reader, writer);
+            },
+            .deflated => {
+                var window: [0x8000]u8 = undefined;
+                var stream = std.compress.deflate.inflateStream(reader, &window);
+
+                try fifo.pump(stream.reader(), writer);
+            },
+            else => return error.CompressionUnsupported,
+        }
+    }
+
     pub const ExtractOptions = struct {
         skip_components: u16 = 0,
     };
+
     pub fn extract(self: *Parser, dir: std.fs.Dir, options: ExtractOptions) !void {
         try self.file.seekTo(0);
 
