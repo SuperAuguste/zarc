@@ -706,7 +706,7 @@ pub fn Parser(comptime Reader: type) type {
 
                     if (last_pos + 1 == hdr.filename_len) continue :extract;
 
-                    break :blk hdr.filename[last_pos + 1 ..];
+                    break :blk if (hdr.filename[last_pos] == '/') hdr.filename[last_pos + 1 ..] else hdr.filename[last_pos..];
                 };
 
                 if (std.fs.path.dirnamePosix(new_filename)) |dirname| {
