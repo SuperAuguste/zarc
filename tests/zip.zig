@@ -44,12 +44,13 @@ pub fn main() !void {
         const size = try archive_file.getEndPos();
 
         var timer = try std.time.Timer.start();
-        var archive = zarc.zip.Parser(std.fs.File.Reader).init(allocator, archive_file.reader());
-        defer archive.deinit();
+        const archive = try zarc.zip.readInfo(archive_file.reader());
 
         try writer.print("File: {s}\n", .{entry.name});
 
-        try archive.load();
+        const archive_dir = try zarc.zip.readDirectory(allocator, archive_file.reader(), archive);
+        defer archive_dir.deinit(allocator);
+
         const time = timer.read();
 
         const load_time = @intToFloat(f64, time) / 1e9;
@@ -64,10 +65,12 @@ pub fn main() !void {
         try writer.print("Entries: {d}\n", .{archive.num_entries});
         try writer.print("ZIP64: {}\n", .{archive.is_zip64});
 
-        // try printFileTree(writer, try archive.getFileTree());
+        // var tree = try archive_dir.getFileTree(allocator);
+        // defer tree.deinit(allocator);
+        // try printFileTree(writer, tree);
 
         // const start = timer.read();
-        // const total_written = try archive.extract(extract_dir, .{ .skip_components = 1 });
+        // const total_written = try archive_dir.extract(archive_file.reader(), extract_dir, .{ .skip_components = 1 });
         // const stop = timer.read();
 
         // const extract_time = @intToFloat(f64, stop - start) / 1e9;
