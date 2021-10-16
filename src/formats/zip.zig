@@ -653,7 +653,7 @@ pub fn Parser(comptime Reader: type) type {
             return error.FileNotFound;
         }
 
-        pub fn readFileAlloc(self: *Self, allocator: *std.mem.Allocator, index: usize) ![]const u8 {
+        pub fn readFileAlloc(self: Self, allocator: *std.mem.Allocator, index: usize) ![]const u8 {
             const header = self.directory.items[index];
 
             try self.seekTo(self.start_offset + header.local_header.offset);
@@ -690,7 +690,7 @@ pub fn Parser(comptime Reader: type) type {
             skip_components: u16 = 0,
         };
 
-        pub fn extract(self: *Self, dir: std.fs.Dir, options: ExtractOptions) !usize {
+        pub fn extract(self: Self, dir: std.fs.Dir, options: ExtractOptions) !usize {
             var buffered = BufferedReader{ .unbuffered_reader = self.reader };
             const file_reader = buffered.reader();
 
@@ -746,7 +746,7 @@ pub fn Parser(comptime Reader: type) type {
 
         /// Returns a file tree of this ZIP archive.
         /// Useful for plucking specific files out of a ZIP or listing it's contents.
-        pub fn getFileTree(self: *Self) !FileTree {
+        pub fn getFileTree(self: Self) !FileTree {
             var tree = FileTree{};
             try tree.entries.ensureTotalCapacity(self.allocator, @intCast(u32, self.directory.items.len));
 
@@ -761,21 +761,21 @@ pub fn Parser(comptime Reader: type) type {
             const prev_len = self.filename_buffer.items.len;
             self.filename_buffer.items.len += len;
 
-            var buf = self.filename_buffer.items[prev_len..][0..len];
+            const buf = self.filename_buffer.items[prev_len..][0..len];
             _ = try reader.readAll(buf);
 
             return buf;
         }
 
-        fn seekTo(self: *Self, offset: u64) !void {
+        fn seekTo(self: Self, offset: u64) !void {
             try self.reader.context.seekTo(offset);
         }
 
-        fn seekBy(self: *Self, offset: i64) !void {
+        fn seekBy(self: Self, offset: i64) !void {
             try self.reader.context.seekBy(offset);
         }
 
-        fn bufferedSeekBy(self: *Self, buffered: *BufferedReader, offset: i64) !void {
+        fn bufferedSeekBy(self: Self, buffered: *BufferedReader, offset: i64) !void {
             if (offset == 0) return;
 
             if (offset > 0) {
@@ -802,13 +802,13 @@ pub fn Parser(comptime Reader: type) type {
             }
         }
 
-        fn bufferedGetPos(self: *Self, buffered: *BufferedReader) !u64 {
+        fn bufferedGetPos(self: Self, buffered: *BufferedReader) !u64 {
             const pos = try self.reader.context.getPos();
 
             return pos - buffered.fifo.count;
         }
 
-        fn bufferedSeekTo(self: *Self, buffered: *BufferedReader, pos: u64) !void {
+        fn bufferedSeekTo(self: Self, buffered: *BufferedReader, pos: u64) !void {
             const offset = @intCast(i64, pos) - @intCast(i64, try self.bufferedGetPos(buffered));
 
             try self.bufferedSeekBy(buffered, offset);
