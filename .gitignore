@@ -1,7 +1,8 @@
-/zig-cache
-/zig-out
+zig-*
 
 *.zip
 *.jmod
 *.tar
 *.exe
+.zigmod
+deps.zig
