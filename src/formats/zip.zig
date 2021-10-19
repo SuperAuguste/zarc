@@ -762,7 +762,8 @@ pub const Directory = struct {
             filename_buffer.items.len += len;
 
             var buf = filename_buffer.items[prev_len..][0..len];
-            _ = try reader.readAll(buf);
+            const read = try reader.readAll(buf);
+            if (read != len) return error.EndOfStream;
 
             return buf;
         }
