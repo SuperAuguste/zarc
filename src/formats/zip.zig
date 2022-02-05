@@ -670,10 +670,9 @@ pub const Directory = struct {
                     try fifo.pump(limited_reader, writer);
                 },
                 .deflated => {
-                    var window: [0x8000]u8 = undefined;
-                    var stream = std.compress.deflate.inflateStream(limited_reader, &window);
-
-                    try fifo.pump(stream.reader(), writer);
+                    var decomp = try std.compress.deflate.decompressor(allocator, limited_reader, null);
+                    defer decomp.deinit();
+                    try fifo.pump(decomp.reader(), writer);
                 },
                 else => return error.CompressionUnsupported,
             }
@@ -729,10 +728,11 @@ pub const Directory = struct {
                         try fifo.pump(limited_reader, fd.writer());
                     },
                     .deflated => {
-                        var window: [0x8000]u8 = undefined;
-                        var stream = std.compress.deflate.inflateStream(limited_reader, &window);
-
-                        try fifo.pump(stream.reader(), fd.writer());
+                        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+                        defer arena.deinit();
+                        var decomp = try std.compress.deflate.decompressor(arena.allocator(), limited_reader, null);
+                        defer decomp.deinit();
+                        try fifo.pump(decomp.reader(), fd.writer());
                     },
                     else => return error.CompressionUnsupported,
                 }
