@@ -124,7 +124,7 @@ pub const InternalAttributes = packed struct {
     pub fn read(self: *InternalAttributes, reader: anytype) !void {
         const data = try reader.readIntLittle(u16);
 
-        self.* = @bitCast(GeneralPurposeBitFlag, data);
+        self.* = @bitCast(InternalAttributes, data);
     }
 
     pub fn write(self: InternalAttributes, writer: anytype) !void {
