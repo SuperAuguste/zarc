@@ -73,7 +73,7 @@ pub fn OctalGroupParser(comptime T: type, comptime Z: type) type {
             inline for (z_fields) |field, i| {
                 fields[i] = .{
                     .name = field.name,
-                    .field_type = T,
+                    .type = T,
                     .default_value = null,
                     .is_comptime = false,
                     .alignment = 0,
@@ -94,8 +94,8 @@ pub fn OctalGroupParser(comptime T: type, comptime Z: type) type {
             comptime var multi_offset: usize = 0;
 
             inline for (z_fields) |field| {
-                std.debug.assert(@field(input, field.name).len == @sizeOf(field.field_type)); // Length mismatch
-                vector_size += @sizeOf(field.field_type);
+                std.debug.assert(@field(input, field.name).len == @sizeOf(field.type)); // Length mismatch
+                vector_size += @sizeOf(field.type);
             }
 
             const VectorT = std.meta.Vector(vector_size, T);
@@ -103,8 +103,8 @@ pub fn OctalGroupParser(comptime T: type, comptime Z: type) type {
             const sub_mask = @splat(vector_size, @intCast(T, 48));
 
             comptime for (z_fields) |field| {
-                fillMultiMask(T, vector_size, &multi_mask, multi_offset, @sizeOf(field.field_type));
-                multi_offset += @sizeOf(field.field_type);
+                fillMultiMask(T, vector_size, &multi_mask, multi_offset, @sizeOf(field.type));
+                multi_offset += @sizeOf(field.type);
             };
 
             var big_boy_buf: [vector_size]T = undefined;
@@ -122,9 +122,9 @@ pub fn OctalGroupParser(comptime T: type, comptime Z: type) type {
             var small_boy_buf: [vector_size]T = vec;
 
             inline for (z_fields) |field| {
-                var imp: std.meta.Vector(@sizeOf(field.field_type), T) = small_boy_buf[sb_off .. sb_off + @sizeOf(field.field_type)].*;
+                var imp: std.meta.Vector(@sizeOf(field.type), T) = small_boy_buf[sb_off .. sb_off + @sizeOf(field.type)].*;
                 @field(o, field.name) = @reduce(.Add, imp);
-                sb_off += @sizeOf(field.field_type);
+                sb_off += @sizeOf(field.type);
             }
 
             return o;

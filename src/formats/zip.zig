@@ -621,8 +621,8 @@ pub fn ReadInfoError(comptime Reader: type) type {
 
             return Directory {
                 .start_offset = info.start_offset,
-                .headers = headers.toOwnedSlice(allocator),
-                .filename_buffer = filename_buffer.toOwnedSlice(allocator),
+                .headers = try headers.toOwnedSlice(allocator),
+                .filename_buffer = try filename_buffer.toOwnedSlice(allocator),
             };
         }
 
@@ -770,7 +770,7 @@ pub const Directory = struct {
 
 fn Seeker(comptime Reader: type) type {
     return struct {
-        pub const Context = std.meta.fieldInfo(Reader, .context).field_type;
+        pub const Context = std.meta.fieldInfo(Reader, .context).type;
         comptime {
             const is_seekable = @hasDecl(Context, "seekBy") and @hasDecl(Context, "seekTo") and @hasDecl(Context, "getEndPos");
             if (!is_seekable) @compileError("Reader must wrap a seekable context");
@@ -781,25 +781,21 @@ fn Seeker(comptime Reader: type) type {
             if (offset == 0) return;
 
             if (offset > 0) {
-                const u_offset = @intCast(u64, offset);
+                const u_offset = @intCast(usize, offset);
 
-                if (u_offset <= buffered.fifo.count) {
-                    buffered.fifo.discard(u_offset);
-                } else if (u_offset <= buffered.fifo.count + buffered.fifo.buf.len) {
-                    const left = u_offset - buffered.fifo.count;
-
-                    buffered.fifo.discard(buffered.fifo.count);
-                    try buffered.reader().skipBytes(left, .{ .buf_size = 8192 });
+                const new_start = buffered.start + u_offset;
+                if (new_start < buffered.end) {
+                    buffered.start = new_start;
                 } else {
-                    const left = u_offset - buffered.fifo.count;
-
-                    buffered.fifo.discard(buffered.fifo.count);
+                    const left = u_offset - (buffered.end - buffered.start);
+                    buffered.start = 0;
+                    buffered.end = 0;
                     try reader.context.seekBy(@intCast(i64, left));
                 }
             } else {
-                const left = offset - @intCast(i64, buffered.fifo.count);
-
-                buffered.fifo.discard(buffered.fifo.count);
+                const left = offset - @intCast(i64, buffered.end - buffered.start);
+                buffered.start = 0;
+                buffered.end = 0;
                 try reader.context.seekBy(left);
             }
         }
@@ -807,7 +803,7 @@ fn Seeker(comptime Reader: type) type {
         pub fn getPos(reader: Reader, buffered: *BufferedReader) !u64 {
             const pos = try reader.context.getPos();
 
-            return pos - buffered.fifo.count;
+            return pos - (buffered.end - buffered.start);
         }
 
         pub fn seekTo(reader: Reader, buffered: *BufferedReader, pos: u64) !void {

@@ -11,14 +11,14 @@ pub fn readStruct(comptime T: type, instance: *T, reader: anytype, comptime expe
 
     comptime var index = 0;
     inline for (fields) |field| {
-        const child = field.field_type;
+        const child = field.type;
 
         switch (@typeInfo(child)) {
             .Struct => |data| {
                 if (data.layout == .Packed) {
                     const Int = std.meta.Int(.unsigned, @sizeOf(child) * 8);
 
-                    @field(instance, field.name) = @bitCast(field.field_type, std.mem.readIntLittle(Int, buf[index..][0..@sizeOf(Int)]));
+                    @field(instance, field.name) = @bitCast(field.type, std.mem.readIntLittle(Int, buf[index..][0..@sizeOf(Int)]));
                     index += @sizeOf(Int);
                 } else {
                     const Int = @typeInfo(@TypeOf(child.read)).Fn.args[0].arg_type.?;
