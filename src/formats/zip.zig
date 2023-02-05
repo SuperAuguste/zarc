@@ -124,7 +124,7 @@ pub const InternalAttributes = packed struct {
     pub fn read(self: *InternalAttributes, reader: anytype) !void {
         const data = try reader.readIntLittle(u16);
 
-        self.* = @bitCast(GeneralPurposeBitFlag, data);
+        self.* = @bitCast(InternalAttributes, data);
     }
 
     pub fn write(self: InternalAttributes, writer: anytype) !void {
@@ -463,7 +463,7 @@ pub const EndCentralDirectoryRecord = struct {
 pub fn LoadError(comptime Reader: type) type {
     return ReadInfoError(Reader) || ReadDirectoryError(Reader);
 }
-pub fn load(allocator: *std.mem.Allocator, reader: anytype) LoadError(@TypeOf(reader))!Directory {
+pub fn load(allocator: std.mem.Allocator, reader: anytype) LoadError(@TypeOf(reader))!Directory {
     const info = try readInfo(reader);
     return try readDirectory(allocator, reader, info);
 }
@@ -574,7 +574,7 @@ pub fn ReadInfoError(comptime Reader: type) type {
         pub fn ReadDirectoryError(comptime Reader: type) type {
             return std.mem.Allocator.Error || Reader.Error || Seeker(Reader).Context.SeekError || CentralDirectoryHeader.ReadSecondaryError || error{ EndOfStream, MalformedCentralDirectoryHeader, MultidiskUnsupported, MalformedLocalFileHeader };
         }
-        pub fn readDirectory(allocator: *std.mem.Allocator, reader: anytype, info: Info) ReadDirectoryError(@TypeOf(reader))!Directory {
+        pub fn readDirectory(allocator: std.mem.Allocator, reader: anytype, info: Info) ReadDirectoryError(@TypeOf(reader))!Directory {
             const Seek = Seeker(@TypeOf(reader));
 
             var headers = try std.ArrayListUnmanaged(CentralDirectoryHeader).initCapacity(allocator, info.num_entries);
@@ -621,8 +621,8 @@ pub fn ReadInfoError(comptime Reader: type) type {
 
             return Directory {
                 .start_offset = info.start_offset,
-                .headers = headers.toOwnedSlice(allocator),
-                .filename_buffer = filename_buffer.toOwnedSlice(allocator),
+                .headers = try headers.toOwnedSlice(allocator),
+                .filename_buffer = try filename_buffer.toOwnedSlice(allocator),
             };
         }
 
@@ -631,7 +631,7 @@ pub const Directory = struct {
     headers: []CentralDirectoryHeader,
     filename_buffer: []u8,
 
-    pub fn deinit(self: Directory, allocator: *std.mem.Allocator) void {
+    pub fn deinit(self: Directory, allocator: std.mem.Allocator) void {
         allocator.free(self.headers);
         allocator.free(self.filename_buffer);
     }
@@ -647,7 +647,7 @@ pub const Directory = struct {
             return error.FileNotFound;
         }
 
-        pub fn readFileAlloc(self: Directory, reader: anytype, allocator: *std.mem.Allocator, index: usize) ![]const u8 {
+        pub fn readFileAlloc(self: Directory, reader: anytype, allocator: std.mem.Allocator, index: usize) ![]const u8 {
             const Seek = Seeker(@TypeOf(reader));
             const header = self.headers.items[index];
 
@@ -670,10 +670,9 @@ pub const Directory = struct {
                     try fifo.pump(limited_reader, writer);
                 },
                 .deflated => {
-                    var window: [0x8000]u8 = undefined;
-                    var stream = std.compress.deflate.inflateStream(limited_reader, &window);
-
-                    try fifo.pump(stream.reader(), writer);
+                    var decomp = try std.compress.deflate.decompressor(allocator, limited_reader, null);
+                    defer decomp.deinit();
+                    try fifo.pump(decomp.reader(), writer);
                 },
                 else => return error.CompressionUnsupported,
             }
@@ -729,10 +728,11 @@ pub const Directory = struct {
                         try fifo.pump(limited_reader, fd.writer());
                     },
                     .deflated => {
-                        var window: [0x8000]u8 = undefined;
-                        var stream = std.compress.deflate.inflateStream(limited_reader, &window);
-
-                        try fifo.pump(stream.reader(), fd.writer());
+                        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+                        defer arena.deinit();
+                        var decomp = try std.compress.deflate.decompressor(arena.allocator(), limited_reader, null);
+                        defer decomp.deinit();
+                        try fifo.pump(decomp.reader(), fd.writer());
                     },
                     else => return error.CompressionUnsupported,
                 }
@@ -743,7 +743,7 @@ pub const Directory = struct {
 
         /// Returns a file tree of this ZIP archive.
         /// Useful for plucking specific files out of a ZIP or listing it's contents.
-        pub fn getFileTree(self: Directory, allocator: *std.mem.Allocator) !FileTree {
+        pub fn getFileTree(self: Directory, allocator: std.mem.Allocator) !FileTree {
             var tree = FileTree{};
             try tree.entries.ensureTotalCapacity(allocator, @intCast(u32, self.headers.len));
             errdefer tree.entries.deinit(allocator);
@@ -770,7 +770,7 @@ pub const Directory = struct {
 
 fn Seeker(comptime Reader: type) type {
     return struct {
-        pub const Context = std.meta.fieldInfo(Reader, .context).field_type;
+        pub const Context = std.meta.fieldInfo(Reader, .context).type;
         comptime {
             const is_seekable = @hasDecl(Context, "seekBy") and @hasDecl(Context, "seekTo") and @hasDecl(Context, "getEndPos");
             if (!is_seekable) @compileError("Reader must wrap a seekable context");
@@ -781,25 +781,21 @@ fn Seeker(comptime Reader: type) type {
             if (offset == 0) return;
 
             if (offset > 0) {
-                const u_offset = @intCast(u64, offset);
+                const u_offset = @intCast(usize, offset);
 
-                if (u_offset <= buffered.fifo.count) {
-                    buffered.fifo.discard(u_offset);
-                } else if (u_offset <= buffered.fifo.count + buffered.fifo.buf.len) {
-                    const left = u_offset - buffered.fifo.count;
-
-                    buffered.fifo.discard(buffered.fifo.count);
-                    try buffered.reader().skipBytes(left, .{ .buf_size = 8192 });
+                const new_start = buffered.start + u_offset;
+                if (new_start < buffered.end) {
+                    buffered.start = new_start;
                 } else {
-                    const left = u_offset - buffered.fifo.count;
-
-                    buffered.fifo.discard(buffered.fifo.count);
+                    const left = u_offset - (buffered.end - buffered.start);
+                    buffered.start = 0;
+                    buffered.end = 0;
                     try reader.context.seekBy(@intCast(i64, left));
                 }
             } else {
-                const left = offset - @intCast(i64, buffered.fifo.count);
-
-                buffered.fifo.discard(buffered.fifo.count);
+                const left = offset - @intCast(i64, buffered.end - buffered.start);
+                buffered.start = 0;
+                buffered.end = 0;
                 try reader.context.seekBy(left);
             }
         }
@@ -807,7 +803,7 @@ fn Seeker(comptime Reader: type) type {
         pub fn getPos(reader: Reader, buffered: *BufferedReader) !u64 {
             const pos = try reader.context.getPos();
 
-            return pos - buffered.fifo.count;
+            return pos - (buffered.end - buffered.start);
         }
 
         pub fn seekTo(reader: Reader, buffered: *BufferedReader, pos: u64) !void {
@@ -824,7 +820,7 @@ pub const FileTree = struct {
     entries: std.StringHashMapUnmanaged(*const CentralDirectoryHeader) = .{},
     structure: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(*const CentralDirectoryHeader)) = .{},
 
-    pub fn appendFile(self: *FileTree, allocator: *std.mem.Allocator, hdr: *const CentralDirectoryHeader) !void {
+    pub fn appendFile(self: *FileTree, allocator: std.mem.Allocator, hdr: *const CentralDirectoryHeader) !void {
         // Determines the end of filename. If the filename is a directory, skip the last character as it is an extraenous `/`, else do nothing.
         var filename_end_index = hdr.filename.len - if (hdr.filename[hdr.filename.len - 1] == '/') @as(usize, 1) else @as(usize, 0);
         var start = if (std.mem.lastIndexOf(u8, hdr.filename[0..filename_end_index], "/")) |ind|
@@ -840,7 +836,7 @@ pub const FileTree = struct {
         try self.entries.put(allocator, hdr.filename, hdr);
     }
 
-    pub fn deinit(self: *FileTree, allocator: *std.mem.Allocator) void {
+    pub fn deinit(self: *FileTree, allocator: std.mem.Allocator) void {
         self.entries.deinit(allocator);
 
         var it = self.structure.valueIterator();
