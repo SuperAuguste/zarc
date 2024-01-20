@@ -2,7 +2,7 @@ const std = @import("std");
 
 const test_names = .{ "zip", "tar" };
 
-pub fn build(b: *std.build.Builder) void {
+pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -23,10 +23,13 @@ pub fn build(b: *std.build.Builder) void {
             .optimize = optimize,
         });
 
-        exe.addAnonymousModule("zarc", .{
-            .source_file = .{ .path = "src/main.zig" },
+        exe.root_module.addAnonymousImport("zarc", .{
+            .root_source_file = .{ .path = "src/main.zig" },
         });
-        const install_exe_step = b.addInstallArtifact(exe);
+        const install_exe_step = b.addInstallArtifact(
+            exe,
+            .{},
+        );
         b.getInstallStep().dependOn(&install_exe_step.step);
 
         const run_exe = b.addRunArtifact(exe);
@@ -35,7 +38,10 @@ pub fn build(b: *std.build.Builder) void {
             run_exe.addArgs(args);
         }
 
-        const run_step = b.step(b.fmt("run-{s}", .{name}), b.fmt("Run the {s} format tests", .{name}));
+        const run_step = b.step(
+            b.fmt("run-{s}", .{name}),
+            b.fmt("Run the {s} format tests", .{name}),
+        );
         run_step.dependOn(&run_exe.step);
     }
 }

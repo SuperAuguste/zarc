@@ -27,13 +27,15 @@ pub fn main() !void {
         const time = timer.read();
 
         try writer.print("File: {s}\n", .{entry.name});
-        try writer.print("Runtime: {d:.3}ms\n\n", .{@intToFloat(f64, time) / 1e6});
+        try writer.print("Runtime: {d:.3}ms\n\n", .{
+            @as(f64, @floatFromInt(time)) / 1e6,
+        });
         try writer.print("Total Size: {d}\n", .{size});
         try writer.print("Entries: {d} ({d})\n", .{ archive.entries.items.len, archive.entries.items.len * @sizeOf(zarc.tar.Header) });
         try writer.print("Strings Size: {d}\n\n", .{archive.string_buffer.items.len});
 
         for (archive.entries.items) |hdr| {
-            try writer.print("{} {s} {d}\n", .{ hdr.kind(), hdr.filename(), hdr.entrySize() });
+            try writer.print("{} {s} {!d}\n", .{ hdr.kind(), hdr.filename(), hdr.entrySize() });
         }
 
         try writer.writeAll("\n\n-----\n\n");

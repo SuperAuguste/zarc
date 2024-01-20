@@ -27,7 +27,7 @@ pub const CompressionMethod = enum(u16) {
     aex_encryption,
 
     pub fn read(self: *CompressionMethod, reader: anytype) !void {
-        const data = try reader.readIntLittle(u16);
+        const data = try reader.readInt(u16, .little);
 
         self.* = @enumFromInt(data);
     }
@@ -69,7 +69,7 @@ pub const Version = struct {
     minor: u8,
 
     pub fn read(self: *Version, reader: anytype) !void {
-        const data = try reader.readIntLittle(u16);
+        const data = try reader.readInt(u16, .little);
 
         self.major = @as(u8, @truncate(data & 0xff)) / 10;
         self.minor = @as(u8, @truncate(data & 0xff)) % 10;
@@ -102,7 +102,7 @@ pub const GeneralPurposeBitFlag = packed struct {
     __15_reserved: u1,
 
     pub fn read(self: *GeneralPurposeBitFlag, reader: anytype) !void {
-        const data = try reader.readIntLittle(u16);
+        const data = try reader.readInt(u16, .little);
 
         self.* = @bitCast(data);
     }
@@ -122,7 +122,7 @@ pub const InternalAttributes = packed struct {
     __8_15_reserved: u8,
 
     pub fn read(self: *InternalAttributes, reader: anytype) !void {
-        const data = try reader.readIntLittle(u16);
+        const data = try reader.readInt(u16, .little);
 
         self.* = @bitCast(data);
     }
@@ -143,13 +143,13 @@ pub const DosTimestamp = struct {
     year: u12,
 
     pub fn read(self: *DosTimestamp, reader: anytype) !void {
-        const time = try reader.readIntLittle(u16);
+        const time = try reader.readInt(u16, .little);
 
         self.second = @as(u6, @as(u5, @truncate(time))) << 1;
         self.minute = @truncate(time >> 5);
         self.hour = @truncate(time >> 11);
 
-        const date = try reader.readIntLittle(u16);
+        const date = try reader.readInt(u16, .little);
 
         self.day = @truncate(date);
         self.month = @truncate(date >> 5);
@@ -201,12 +201,12 @@ pub const LocalFileHeader = struct {
         try self.compression.read(reader);
         try self.mtime.read(reader);
 
-        self.checksum = try reader.readIntLittle(u32);
-        self.compressed_size = try reader.readIntLittle(u32);
-        self.uncompressed_size = try reader.readIntLittle(u32);
+        self.checksum = try reader.readInt(u32, .little);
+        self.compressed_size = try reader.readInt(u32, .little);
+        self.uncompressed_size = try reader.readInt(u32, .little);
 
-        self.filename_len = try reader.readIntLittle(u16);
-        self.extrafield_len = try reader.readIntLittle(u16);
+        self.filename_len = try reader.readInt(u16, .little);
+        self.extrafield_len = try reader.readInt(u16, .little);
 
         self.offset = central_header.offset + 30 + self.filename_len + self.extrafield_len;
 
@@ -215,7 +215,7 @@ pub const LocalFileHeader = struct {
         if (self.filename_len != central_header.filename_len) return error.MalformedLocalFileHeader;
         try Seek.seekBy(seeker, reader.context, @intCast(self.filename_len));
 
-        var is_zip64 = false;
+        const is_zip64 = false;
         var extra_read: u32 = 0;
 
         const needs_uncompressed_size = self.uncompressed_size == 0xFFFFFFFF;
@@ -224,14 +224,14 @@ pub const LocalFileHeader = struct {
         const required_zip64_size = (@as(u5, @intFromBool(needs_uncompressed_size)) + @as(u5, @intFromBool(needs_compressed_size))) * 8;
 
         while (extra_read < self.extrafield_len) {
-            const field_id = try reader.readIntLittle(u16);
-            const field_size = try reader.readIntLittle(u16);
+            const field_id = try reader.readInt(u16, .little);
+            const field_size = try reader.readInt(u16, .little);
             extra_read += 4;
 
             if (field_id == 0x0001) {
                 if (field_size < required_zip64_size) return error.MalformedExtraField;
-                if (needs_uncompressed_size) self.uncompressed_size = try reader.readIntLittle(u64);
-                if (needs_compressed_size) self.compressed_size = try reader.readIntLittle(u64);
+                if (needs_uncompressed_size) self.uncompressed_size = try reader.readInt(u64, .little);
+                if (needs_compressed_size) self.compressed_size = try reader.readInt(u64, .little);
 
                 extra_read += required_zip64_size;
 
@@ -265,27 +265,27 @@ pub const DataDescriptor = struct {
     uncompressed_size: u64,
 
     pub fn read(self: *DataDescriptor, reader: anytype, zip64: bool) !void {
-        const signature = try reader.readIntLittle(u32);
+        const signature = try reader.readInt(u32, .little);
         if (signature == DataDescriptor.Signature) {
             if (zip64) {
-                self.checksum = try reader.readIntLittle(u64);
-                self.compressed_size = try reader.readIntLittle(u64);
-                self.uncompressed_size = try reader.readIntLittle(u64);
+                self.checksum = try reader.readInt(u64, .little);
+                self.compressed_size = try reader.readInt(u64, .little);
+                self.uncompressed_size = try reader.readInt(u64, .little);
             } else {
-                self.checksum = try reader.readIntLittle(u32);
-                self.compressed_size = try reader.readIntLittle(u32);
-                self.uncompressed_size = try reader.readIntLittle(u32);
+                self.checksum = try reader.readInt(u32, .little);
+                self.compressed_size = try reader.readInt(u32, .little);
+                self.uncompressed_size = try reader.readInt(u32, .little);
             }
         } else {
             if (zip64) {
-                const next_u32 = try reader.readIntLittle(u32);
+                const next_u32 = try reader.readInt(u32, .little);
                 self.checksum = @as(u64, next_u32) << 32 | signature;
-                self.compressed_size = try reader.readIntLittle(u64);
-                self.uncompressed_size = try reader.readIntLittle(u64);
+                self.compressed_size = try reader.readInt(u64, .little);
+                self.uncompressed_size = try reader.readInt(u64, .little);
             } else {
                 self.checksum = signature;
-                self.compressed_size = try reader.readIntLittle(u32);
-                self.uncompressed_size = try reader.readIntLittle(u32);
+                self.compressed_size = try reader.readInt(u32, .little);
+                self.uncompressed_size = try reader.readInt(u32, .little);
             }
         }
     }
@@ -326,18 +326,18 @@ pub const CentralDirectoryHeader = struct {
         try self.compression.read(reader);
         try self.mtime.read(reader);
 
-        self.checksum = try reader.readIntLittle(u32);
-        self.compressed_size = try reader.readIntLittle(u32);
-        self.uncompressed_size = try reader.readIntLittle(u32);
+        self.checksum = try reader.readInt(u32, .little);
+        self.compressed_size = try reader.readInt(u32, .little);
+        self.uncompressed_size = try reader.readInt(u32, .little);
 
-        self.filename_len = try reader.readIntLittle(u16);
-        self.extrafield_len = try reader.readIntLittle(u16);
-        self.file_comment_len = try reader.readIntLittle(u16);
+        self.filename_len = try reader.readInt(u16, .little);
+        self.extrafield_len = try reader.readInt(u16, .little);
+        self.file_comment_len = try reader.readInt(u16, .little);
 
-        self.disk_start = try reader.readIntLittle(u16);
+        self.disk_start = try reader.readInt(u16, .little);
         try self.internal_attributes.read(reader);
-        self.external_attributes = try reader.readIntLittle(u32);
-        self.offset = try reader.readIntLittle(u32);
+        self.external_attributes = try reader.readInt(u32, .little);
+        self.offset = try reader.readInt(u32, .little);
     }
 
     const ReadSecondaryError = error{MalformedExtraField};
@@ -355,15 +355,15 @@ pub const CentralDirectoryHeader = struct {
             var read: usize = 0;
 
             while (read < self.extrafield_len) {
-                const field_id = try reader.readIntLittle(u16);
-                const field_size = try reader.readIntLittle(u16);
+                const field_id = try reader.readInt(u16, .little);
+                const field_size = try reader.readInt(u16, .little);
                 read += 4;
 
                 if (field_id == 0x0001) {
                     if (field_size < required_zip64_size) return error.MalformedExtraField;
-                    if (needs_uncompressed_size) self.uncompressed_size = try reader.readIntLittle(u64);
-                    if (needs_compressed_size) self.compressed_size = try reader.readIntLittle(u64);
-                    if (needs_header_offset) self.offset = try reader.readIntLittle(u64);
+                    if (needs_uncompressed_size) self.uncompressed_size = try reader.readInt(u64, .little);
+                    if (needs_compressed_size) self.compressed_size = try reader.readInt(u64, .little);
+                    if (needs_header_offset) self.offset = try reader.readInt(u64, .little);
 
                     read += required_zip64_size;
 
@@ -402,18 +402,18 @@ pub const EndCentralDirectory64Record = struct {
     directory_offset: u64,
 
     pub fn parse(self: *EndCentralDirectory64Record, reader: anytype) (@TypeOf(reader).Error || error{EndOfStream})!void {
-        self.record_size = try reader.readIntLittle(u64);
+        self.record_size = try reader.readInt(u64, .little);
 
         try self.version_made.read(reader);
         try self.version_needed.read(reader);
 
-        self.disk_number = try reader.readIntLittle(u32);
-        self.disk_start_directory = try reader.readIntLittle(u32);
-        self.disk_directory_entries = try reader.readIntLittle(u64);
+        self.disk_number = try reader.readInt(u32, .little);
+        self.disk_start_directory = try reader.readInt(u32, .little);
+        self.disk_directory_entries = try reader.readInt(u64, .little);
 
-        self.directory_entry_count = try reader.readIntLittle(u64);
-        self.directory_size = try reader.readIntLittle(u64);
-        self.directory_offset = try reader.readIntLittle(u64);
+        self.directory_entry_count = try reader.readInt(u64, .little);
+        self.directory_size = try reader.readInt(u64, .little);
+        self.directory_offset = try reader.readInt(u64, .little);
     }
 };
 
@@ -426,9 +426,9 @@ pub const EndCentralDirectory64Locator = struct {
     number_of_disks: u32,
 
     pub fn parse(self: *EndCentralDirectory64Locator, reader: anytype) (@TypeOf(reader).Error || error{EndOfStream})!void {
-        self.directory_disk_number = try reader.readIntLittle(u32);
-        self.directory_offset = try reader.readIntLittle(u64);
-        self.number_of_disks = try reader.readIntLittle(u32);
+        self.directory_disk_number = try reader.readInt(u32, .little);
+        self.directory_offset = try reader.readInt(u64, .little);
+        self.number_of_disks = try reader.readInt(u32, .little);
     }
 };
 
@@ -447,15 +447,15 @@ pub const EndCentralDirectoryRecord = struct {
     comment_length: u16,
 
     pub fn parse(self: *EndCentralDirectoryRecord, reader: anytype) (@TypeOf(reader).Error || error{EndOfStream})!void {
-        self.disk_number = try reader.readIntLittle(u16);
-        self.disk_start_directory = try reader.readIntLittle(u16);
-        self.disk_directory_entries = try reader.readIntLittle(u16);
+        self.disk_number = try reader.readInt(u16, .little);
+        self.disk_start_directory = try reader.readInt(u16, .little);
+        self.disk_directory_entries = try reader.readInt(u16, .little);
 
-        self.directory_entry_count = try reader.readIntLittle(u16);
-        self.directory_size = try reader.readIntLittle(u32);
-        self.directory_offset = try reader.readIntLittle(u32);
+        self.directory_entry_count = try reader.readInt(u16, .little);
+        self.directory_size = try reader.readInt(u32, .little);
+        self.directory_offset = try reader.readInt(u32, .little);
 
-        self.comment_length = try reader.readIntLittle(u16);
+        self.comment_length = try reader.readInt(u16, .little);
     }
 };
 
@@ -490,7 +490,7 @@ pub fn ReadInfoError(comptime Reader: type) type {
 
             // Find the ECDR signature with a broad pass.
             var pos = file_length - minimum_ecdr_offset;
-            var last_pos = if (maximum_ecdr_offset > file_length) file_length else file_length - maximum_ecdr_offset;
+            const last_pos = if (maximum_ecdr_offset > file_length) file_length else file_length - maximum_ecdr_offset;
             var buffer: [4096]u8 = undefined;
 
             find: while (pos > 0) {
@@ -501,7 +501,7 @@ pub fn ReadInfoError(comptime Reader: type) type {
 
                 var i: usize = 0;
                 while (i < read - 4) : (i += 1) {
-                    if (std.mem.readIntLittle(u32, buffer[i..][0..4]) == EndCentralDirectoryRecord.Signature) {
+                    if (std.mem.readInt(u32, buffer[i..][0..4], .little) == EndCentralDirectoryRecord.Signature) {
                         pos = pos + i;
                         try reader.context.seekTo(pos + 4);
 
@@ -522,7 +522,7 @@ pub fn ReadInfoError(comptime Reader: type) type {
 
                 var locator: EndCentralDirectory64Locator = undefined;
 
-                const locator_sig = try reader.readIntLittle(u32);
+                const locator_sig = try reader.readInt(u32, .little);
                 if (locator_sig == EndCentralDirectory64Locator.Signature) {
                     try locator.parse(reader);
 
@@ -530,7 +530,7 @@ pub fn ReadInfoError(comptime Reader: type) type {
 
                     try reader.context.seekTo(locator.directory_offset);
 
-                    const ecd64_sig = try reader.readIntLittle(u32);
+                    const ecd64_sig = try reader.readInt(u32, .little);
                     if (ecd64_sig == EndCentralDirectory64Record.Signature) {
                         try self.ecd64.parse(reader);
 
@@ -588,7 +588,7 @@ pub fn ReadInfoError(comptime Reader: type) type {
 
             var filename_len_total: usize = 0;
             while (index < info.num_entries) : (index += 1) {
-                const sig = try buffered_reader.readIntLittle(u32);
+                const sig = try buffered_reader.readInt(u32, .little);
                 if (sig != CentralDirectoryHeader.Signature) return error.MalformedCentralDirectoryHeader;
 
                 var hdr = headers.addOneAssumeCapacity();
@@ -614,7 +614,7 @@ pub fn ReadInfoError(comptime Reader: type) type {
 
             for (headers.items) |*hdr| {
                 try Seek.seekTo(reader, buffered_reader.context, info.start_offset + hdr.offset);
-                const signature = try buffered_reader.readIntLittle(u32);
+                const signature = try buffered_reader.readInt(u32, .little);
                 if (signature != LocalFileHeader.Signature) return error.MalformedLocalFileHeader;
                 try hdr.local_header.read(hdr, reader, buffered_reader);
             }
@@ -653,7 +653,7 @@ pub const Directory = struct {
 
             reader.context.seekTo(self.start_offset + header.local_header.offset);
 
-            var buffer = try allocator.alloc(u8, header.uncompressed_size);
+            const buffer = try allocator.alloc(u8, header.uncompressed_size);
             errdefer allocator.free(buffer);
 
             var read_buffered = Seek.BufferedReader{ .unbuffered_reader = reader };
@@ -761,7 +761,7 @@ pub const Directory = struct {
             const prev_len = filename_buffer.items.len;
             filename_buffer.items.len += len;
 
-            var buf = filename_buffer.items[prev_len..][0..len];
+            const buf = filename_buffer.items[prev_len..][0..len];
             const read = try reader.readAll(buf);
             if (read != len) return error.EndOfStream;
 
@@ -822,8 +822,8 @@ pub const FileTree = struct {
 
     pub fn appendFile(self: *FileTree, allocator: std.mem.Allocator, hdr: *const CentralDirectoryHeader) !void {
         // Determines the end of filename. If the filename is a directory, skip the last character as it is an extraenous `/`, else do nothing.
-        var filename_end_index = hdr.filename.len - if (hdr.filename[hdr.filename.len - 1] == '/') @as(usize, 1) else @as(usize, 0);
-        var start = if (std.mem.lastIndexOf(u8, hdr.filename[0..filename_end_index], "/")) |ind|
+        const filename_end_index = hdr.filename.len - if (hdr.filename[hdr.filename.len - 1] == '/') @as(usize, 1) else @as(usize, 0);
+        const start = if (std.mem.lastIndexOf(u8, hdr.filename[0..filename_end_index], "/")) |ind|
             hdr.filename[0..ind]
         else
             "/";

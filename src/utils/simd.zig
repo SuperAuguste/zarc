@@ -70,7 +70,7 @@ pub fn OctalGroupParser(comptime T: type, comptime Z: type) type {
         .fields = &comptime fields: {
             var fields: [z_fields.len]std.builtin.TypeInfo.StructField = undefined;
 
-            inline for (z_fields, 0..) |field, i| {
+            for (z_fields, 0..) |field, i| {
                 fields[i] = .{
                     .name = field.name,
                     .type = T,
@@ -108,7 +108,7 @@ pub fn OctalGroupParser(comptime T: type, comptime Z: type) type {
             };
 
             var big_boy_buf: [vector_size]T = undefined;
-            var bc: [vector_size]u8 = @bitCast(input);
+            const bc: [vector_size]u8 = @bitCast(input);
             for (bc, 0..) |b, i| big_boy_buf[i] = b;
 
             // Let's actually do the math now!
@@ -122,7 +122,7 @@ pub fn OctalGroupParser(comptime T: type, comptime Z: type) type {
             var small_boy_buf: [vector_size]T = vec;
 
             inline for (z_fields) |field| {
-                var imp: std.meta.Vector(@sizeOf(field.type), T) = small_boy_buf[sb_off .. sb_off + @sizeOf(field.type)].*;
+                const imp: std.meta.Vector(@sizeOf(field.type), T) = small_boy_buf[sb_off .. sb_off + @sizeOf(field.type)].*;
                 @field(o, field.name) = @reduce(.Add, imp);
                 sb_off += @sizeOf(field.type);
             }

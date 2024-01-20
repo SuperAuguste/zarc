@@ -22,7 +22,10 @@ fn printFileTree(writer: anytype, file_tree: zarc.zip.FileTree) !void {
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
-    var tests_dir = try std.fs.cwd().openIterableDir("tests/zip", .{});
+    var tests_dir = try std.fs.cwd().openDir(
+        "tests/zip",
+        .{ .iterate = true },
+    );
     defer tests_dir.close();
 
     var main_extract_dir = try std.fs.cwd().makeOpenPath("tests/extract/zip", .{});
@@ -35,7 +38,7 @@ pub fn main() !void {
 
     var it = tests_dir.iterate();
     while (try it.next()) |entry| {
-        var archive_file = try tests_dir.dir.openFile(entry.name, .{});
+        var archive_file = try tests_dir.openFile(entry.name, .{});
         defer archive_file.close();
 
         var extract_dir = try main_extract_dir.makeOpenPath(entry.name, .{});
