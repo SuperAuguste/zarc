@@ -15,6 +15,10 @@ pub fn build(b: *std.Build) void {
     const run_tests = b.step("test", "Run library tests");
     run_tests.dependOn(&tests.step);
 
+    const zarc_mod = b.addModule("zarc", .{
+        .root_source_file = .{ .path = "src/main.zig" },
+    });
+
     inline for (test_names) |name| {
         const exe = b.addExecutable(.{
             .name = b.fmt("zarc-{s}", .{name}),
@@ -23,9 +27,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
 
-        exe.root_module.addAnonymousImport("zarc", .{
-            .root_source_file = .{ .path = "src/main.zig" },
-        });
+        exe.root_module.addImport("zarc", zarc_mod);
         const install_exe_step = b.addInstallArtifact(
             exe,
             .{},
