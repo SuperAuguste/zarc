@@ -46,4 +46,12 @@ pub fn build(b: *std.Build) void {
         );
         run_step.dependOn(&run_exe.step);
     }
+
+    b.step("fmt", "myfmt").dependOn(&b.addFmt(.{
+        .paths = &[_][]const u8{
+            "build.zig",
+            "build.zig.zon",
+            "src",
+        },
+    }).step);
 }
