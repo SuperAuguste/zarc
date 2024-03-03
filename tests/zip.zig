@@ -22,7 +22,10 @@ fn printFileTree(writer: anytype, file_tree: zarc.zip.FileTree) !void {
 pub fn main() !void {
     const allocator = std.heap.page_allocator;
 
-    var tests_dir = try std.fs.cwd().openIterableDir("tests/zip", .{});
+    var tests_dir = try std.fs.cwd().openDir(
+        "tests/zip",
+        .{ .iterate = true },
+    );
     defer tests_dir.close();
 
     var main_extract_dir = try std.fs.cwd().makeOpenPath("tests/extract/zip", .{});
@@ -35,7 +38,7 @@ pub fn main() !void {
 
     var it = tests_dir.iterate();
     while (try it.next()) |entry| {
-        var archive_file = try tests_dir.dir.openFile(entry.name, .{});
+        var archive_file = try tests_dir.openFile(entry.name, .{});
         defer archive_file.close();
 
         var extract_dir = try main_extract_dir.makeOpenPath(entry.name, .{});
@@ -53,8 +56,8 @@ pub fn main() !void {
 
         const time = timer.read();
 
-        const load_time = @intToFloat(f64, time) / 1e9;
-        const read_speed = (@intToFloat(f64, archive.ecd.directory_size) * 2 + @intToFloat(f64, archive.directory_offset)) / load_time;
+        const load_time = @as(f64, @floatFromInt(time)) / 1e9;
+        const read_speed = (@as(f64, @floatFromInt(archive.ecd.directory_size)) * 2 + @as(f64, @floatFromInt(archive.directory_offset))) / load_time;
 
         try writer.print("Runtime: {d:.3}ms\n\n", .{load_time * 1e3});
         try writer.print("Speed: {d:.3} MB/s\n", .{read_speed / 1e6});

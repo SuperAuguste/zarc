@@ -16,7 +16,7 @@ pub fn parseOctal(comptime T: type, comptime size: usize, buf: [size]u8) T {
     comptime var multi_mask: VectorT = undefined;
     // This "subtraction mask" Turns ASCII numbers into actual numbers
     // by subtracting 48, the ASCII value of '0'
-    const sub_mask = @splat(size, @intCast(T, 48));
+    const sub_mask: @Vector(size, T) = @splat(@as(T, 48));
 
     // Our accumulator for our "multiplication mask" (1, 8, 64, etc.)
     comptime var acc: T = 1;
@@ -32,7 +32,7 @@ pub fn parseOctal(comptime T: type, comptime size: usize, buf: [size]u8) T {
 
     // Let's actually do the math now!
     var vec: VectorT = undefined;
-    for (buf) |b, i| vec[i] = b;
+    for (buf, 0..) |b, i| vec[i] = b;
     // Applies our "subtraction mask"
     vec -= sub_mask;
     // Applies our "multiplication mask"
@@ -70,7 +70,7 @@ pub fn OctalGroupParser(comptime T: type, comptime Z: type) type {
         .fields = &comptime fields: {
             var fields: [z_fields.len]std.builtin.TypeInfo.StructField = undefined;
 
-            inline for (z_fields) |field, i| {
+            for (z_fields, 0..) |field, i| {
                 fields[i] = .{
                     .name = field.name,
                     .type = T,
@@ -100,7 +100,7 @@ pub fn OctalGroupParser(comptime T: type, comptime Z: type) type {
 
             const VectorT = std.meta.Vector(vector_size, T);
             comptime var multi_mask: VectorT = undefined;
-            const sub_mask = @splat(vector_size, @intCast(T, 48));
+            const sub_mask: @Vector(vector_size, T) = @splat(@as(T, 48));
 
             comptime for (z_fields) |field| {
                 fillMultiMask(T, vector_size, &multi_mask, multi_offset, @sizeOf(field.type));
@@ -108,8 +108,8 @@ pub fn OctalGroupParser(comptime T: type, comptime Z: type) type {
             };
 
             var big_boy_buf: [vector_size]T = undefined;
-            var bc = @bitCast([vector_size]u8, input);
-            for (bc) |b, i| big_boy_buf[i] = b;
+            const bc: [vector_size]u8 = @bitCast(input);
+            for (bc, 0..) |b, i| big_boy_buf[i] = b;
 
             // Let's actually do the math now!
             var vec: VectorT = big_boy_buf;
@@ -122,7 +122,7 @@ pub fn OctalGroupParser(comptime T: type, comptime Z: type) type {
             var small_boy_buf: [vector_size]T = vec;
 
             inline for (z_fields) |field| {
-                var imp: std.meta.Vector(@sizeOf(field.type), T) = small_boy_buf[sb_off .. sb_off + @sizeOf(field.type)].*;
+                const imp: std.meta.Vector(@sizeOf(field.type), T) = small_boy_buf[sb_off .. sb_off + @sizeOf(field.type)].*;
                 @field(o, field.name) = @reduce(.Add, imp);
                 sb_off += @sizeOf(field.type);
             }

@@ -1,0 +1,10 @@
+.{
+    .paths = .{
+        "src",
+        "build.zig",
+        "tests",
+    },
+    .name = "zarc",
+    .version = "0.0.1",
+    .dependencies = .{},
+}
